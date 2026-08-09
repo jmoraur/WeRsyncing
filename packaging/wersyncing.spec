@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,12 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Sun Aug 09 2026 Jan Moraru <jan@moraru.ch> - 0.5.0-1
+- New media-import job type: dedup a phone dump folder against the photo
+  archive (size + blake2b-256), delete exact duplicates from the dump,
+  move new media into a chosen destination folder; dry-run mode and an
+  archive-internal duplicate report included
+
 * Tue Jul 21 2026 Jan Moraru <jan@moraru.ch> - 0.4.0-1
 - Rename package wersynking -> wersyncing (app is now "WeRsyncing");
   command, desktop entry and two-color wordmark updated to match
