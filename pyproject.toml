@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wersyncing"
-version = "0.6.0"
+version = "0.6.1"
 description = "WeRsyncing — managed rsync connections with a PySide6/QML UI"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"

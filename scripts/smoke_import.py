@@ -202,6 +202,9 @@ def main():
     write(os.path.join(src, "Immich", "col.jpg"), b"COL-SRC-CONTENT!")
     write(os.path.join(cdest, "col.jpg"), b"COL-DEST-CONTENT")
     write(os.path.join(src, "notes.txt"), b"not media")
+    write(os.path.join(src, "Immich", ".trashed-1788-gone.jpg"),
+          b"TRASHED-CONTENT")
+    write(os.path.join(src, ".thumbnails", "tn.jpg"), b"THUMB-CONTENT")
     os.makedirs(os.path.join(src, "cempty"))
     ccfg = {**cfg, "dump_path": src, "dest_path": cdest, "copy_mode": 1}
     before_src = snapshot(src)
@@ -232,6 +235,9 @@ def main():
        "in-dump twin copied once, second reported as twin")
     ok("dup_of_a.jpg" not in d and "already in the archive" in text,
        "archive duplicate skipped, not copied")
+    ok(not any("trashed" in k or "tn.jpg" in k for k in d)
+       and "Ignored 2 hidden" in text,
+       "hidden files and folders ignored, not imported")
     ok(not any(k.endswith(".part") for k in d), "no .part temps left")
     row = conn.execute(
         "SELECT * FROM archive_files WHERE relpath = ?",

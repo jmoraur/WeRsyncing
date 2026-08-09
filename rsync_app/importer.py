@@ -165,9 +165,12 @@ def run_dup_report(cfg: dict, conn, progress=print, cancelled=_never) -> int:
 
 def _plan(dump, dest, archive, conn, progress, cancelled,
           copy=False) -> list[_Plan]:
-    files, unreadable = _scan_dump(dump)
+    files, unreadable, hidden = _scan_dump(dump)
     label = "Source" if copy else "Dump"
     progress(f"{label} folder: {len(files):,} files to check.")
+    if hidden:
+        progress(f"Ignored {hidden:,} hidden files/folders (names starting"
+                 " with '.' — trashed or pending media, caches).")
     try:
         dest_names = set(os.listdir(dest))
     except OSError:
@@ -298,12 +301,21 @@ def _plan(dump, dest, archive, conn, progress, cancelled,
     return plans
 
 
-def _scan_dump(dump: str) -> tuple[list[tuple], list[tuple]]:
+def _scan_dump(dump: str) -> tuple[list[tuple], list[tuple], int]:
     """Regular files under dump, plus a list of entries that could not be
-    statted (flaky MTP reads must cost one file, not the run)."""
+    statted (flaky MTP reads must cost one file, not the run) and a count
+    of ignored hidden entries. Hidden files and folders (leading dot) are
+    never imported: on Android they are trashed/pending media and
+    thumbnail caches — resurrecting deleted photos would be a bug."""
     files, unreadable = [], []
-    for dirpath, _dirnames, filenames in os.walk(dump):
+    hidden = 0
+    for dirpath, dirnames, filenames in os.walk(dump):
+        hidden += sum(1 for d in dirnames if d.startswith("."))
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         for fname in filenames:
+            if fname.startswith("."):
+                hidden += 1
+                continue
             if fname.endswith(".part"):   # our own copy temps
                 continue
             full = os.path.join(dirpath, fname)
@@ -318,7 +330,7 @@ def _scan_dump(dump: str) -> tuple[list[tuple], list[tuple]]:
             files.append((full, os.path.relpath(full, dump),
                           st.st_size, st.st_mtime_ns))
     files.sort(key=lambda f: f[1])
-    return files, unreadable
+    return files, unreadable, hidden
 
 
 def _next_name(name: str, dest_names: set, claimed: dict) -> str:

@@ -36,8 +36,9 @@ command it is about to execute.
   *copy* mode the source is never touched — made for importing straight off
   a phone on an MTP mount: new files are copied over (verified), duplicates
   are just reported, and single unreadable files don't abort the run.
-  Includes a dry-run mode and a report-only duplicate finder for the
-  archive itself.
+  Hidden files and folders are never imported (on Android those are
+  trashed/pending media and thumbnail caches). Includes a dry-run mode
+  and a report-only duplicate finder for the archive itself.
 
 ## Install (Fedora)
 
