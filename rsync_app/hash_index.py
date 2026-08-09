@@ -64,6 +64,19 @@ def hash_file(path: str, cancelled=_never) -> bytes | None:
             h.update(chunk)
 
 
+def copy_hash(src: str, dst: str) -> bytes:
+    """Copy src to dst while hashing it, one read of the source. Returns the
+    digest of what was written."""
+    h = hashlib.blake2b(digest_size=32)
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        while True:
+            chunk = fsrc.read(_CHUNK)
+            if not chunk:
+                return h.digest()
+            h.update(chunk)
+            fdst.write(chunk)
+
+
 def refresh(conn: sqlite3.Connection, root: str,
             progress=None, cancelled=_never) -> int:
     """Stat-walk `root` and sync the index rows for it: insert new files,
@@ -83,10 +96,15 @@ def refresh(conn: sqlite3.Connection, root: str,
             if cancelled():
                 conn.commit()
                 return len(seen)
+            if name.endswith(".part"):   # the importer's own copy temps
+                continue
             full = os.path.join(dirpath, name)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
-            st = os.stat(full)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
             rel = os.path.relpath(full, root)
             seen.add(rel)
             if known.get(rel) != (st.st_size, st.st_mtime_ns):
@@ -118,6 +136,14 @@ def count(conn: sqlite3.Connection, root: str) -> int:
         "SELECT COUNT(*) AS n FROM archive_files WHERE root = ?", (root,)
     ).fetchone()
     return row["n"]
+
+
+def get_row(conn: sqlite3.Connection, root: str, relpath: str) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM archive_files WHERE root = ? AND relpath = ?",
+        (root, relpath),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 def by_size(conn: sqlite3.Connection, root: str, size: int) -> list[dict]:

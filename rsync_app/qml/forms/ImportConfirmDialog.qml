@@ -4,15 +4,17 @@ import QtQuick.Layouts
 import "../components"
 
 // Confirmation for running an import job. Shows the three folders and
-// says plainly what a real run does — duplicates of archived files are
-// DELETED from the dump, with no trash bin. Warnings must each be
+// says plainly what a real run does — in move mode, duplicates of
+// archived files are DELETED from the dump with no trash bin; in copy
+// mode nothing in the source is ever touched. Warnings must each be
 // acknowledged before a real run; a dry run changes nothing and needs no
 // acknowledgements (it's the recommended first step). "Find duplicates in
 // archive" starts the report-only scan of the archive itself.
 Dialog {
     id: dlg
     modal: true
-    title: "Import from dump folder"
+    title: dlg.copyMode ? "Import from source folder"
+                        : "Import from dump folder"
     standardButtons: Dialog.NoButton
     width: 620
 
@@ -20,6 +22,7 @@ Dialog {
     property var job: ({})
     property var issues: []
     property var _acks: ({})
+    readonly property bool copyMode: (dlg.job.copy_mode || 0) === 1
 
     readonly property bool hasErrors:
         issues.some(i => i.severity === "error")
@@ -52,7 +55,7 @@ Dialog {
             rowSpacing: 2
             Layout.fillWidth: true
 
-            Label { text: "Dump"; opacity: 0.6 }
+            Label { text: dlg.copyMode ? "Source" : "Dump"; opacity: 0.6 }
             Label {
                 text: dlg.job.dump_path || ""
                 font.family: Theme.mono
@@ -82,11 +85,16 @@ Dialog {
             Layout.fillWidth: true
             Layout.topMargin: Theme.s1
             wrapMode: Text.Wrap
-            text: "New files are moved to the destination. Files that are"
-                  + " already in the archive (or already at the destination)"
-                  + " are deleted from the dump folder — there is no trash"
-                  + " bin. Files that aren't photos or videos stay where"
-                  + " they are."
+            text: dlg.copyMode
+                  ? "New files are copied to the destination. Files that"
+                    + " are already in the archive (or already at the"
+                    + " destination) are skipped. Nothing in the source"
+                    + " folder is changed or deleted."
+                  : "New files are moved to the destination. Files that are"
+                    + " already in the archive (or already at the destination)"
+                    + " are deleted from the dump folder — there is no trash"
+                    + " bin. Files that aren't photos or videos stay where"
+                    + " they are."
         }
 
         IssueList {

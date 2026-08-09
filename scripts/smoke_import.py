@@ -5,6 +5,9 @@ Builds a throwaway dump/archive fixture in a tempdir and checks: dedup
 deletion, moves, collision renames, already-at-destination handling,
 non-media skips, empty-folder pruning, dry-run inertness, idempotent
 re-runs, the tampered-index delete guard, and preflight overlap aborts.
+Copy mode gets its own sections: source never modified, duplicates
+skipped, no pruning, read-only sources, and per-file read errors costing
+one file (exit 3) instead of the run.
 
 Run: python3 scripts/smoke_import.py
 """
@@ -187,6 +190,92 @@ def main():
                       conn)
     ok(code == importer.EXIT_PREFLIGHT, "overlapping config exit 2")
     ok(snapshot(archive) == before_arch, "abort changed nothing")
+
+    print("== copy mode: dry run ==")
+    src = os.path.join(tmp, "phone")
+    cdest = os.path.join(archive, "2026", "2026.09 - Copy")
+    os.makedirs(cdest)
+    write(os.path.join(src, "Immich", "dup_of_a.jpg"), a_bytes)
+    write(os.path.join(src, "Immich", "cnew.jpg"), b"COPY-NEW-1")
+    write(os.path.join(src, "Immich", "ctwin.jpg"), b"CTWIN-CONTENT")
+    write(os.path.join(src, "sub", "ctwin.jpg"), b"CTWIN-CONTENT")
+    write(os.path.join(src, "Immich", "col.jpg"), b"COL-SRC-CONTENT!")
+    write(os.path.join(cdest, "col.jpg"), b"COL-DEST-CONTENT")
+    write(os.path.join(src, "notes.txt"), b"not media")
+    os.makedirs(os.path.join(src, "cempty"))
+    ccfg = {**cfg, "dump_path": src, "dest_path": cdest, "copy_mode": 1}
+    before_src = snapshot(src)
+    before_cdest = snapshot(cdest)
+    code, lines = run(ccfg, conn, dry_run=True)
+    text = "\n".join(lines)
+    ok(code == importer.EXIT_OK, "copy dry run exit 0")
+    ok(snapshot(src) == before_src and snapshot(cdest) == before_cdest,
+       "copy dry run changed nothing")
+    ok("copy  Immich/cnew.jpg" in text and "left on source" in text,
+       "copy dry run predicts copies and skips")
+
+    print("== copy mode: real run ==")
+    code, lines = run(ccfg, conn)
+    text = "\n".join(lines)
+    ok(code == importer.EXIT_OK, "copy run exit 0")
+    ok(snapshot(src) == before_src, "source completely untouched")
+    ok(os.path.isdir(os.path.join(src, "cempty")),
+       "empty source folder not pruned")
+    d = snapshot(cdest)
+    ok(d.get("cnew.jpg") == b"COPY-NEW-1", "new file copied")
+    ok(d.get("col.jpg") == b"COL-DEST-CONTENT"
+       and d.get("col (2).jpg") == b"COL-SRC-CONTENT!",
+       "collision copied under a new name, original untouched")
+    ok(d.get("ctwin.jpg") == b"CTWIN-CONTENT"
+       and sum(1 for k in d if "ctwin" in k) == 1
+       and "in this import, left on source" in text,
+       "in-dump twin copied once, second reported as twin")
+    ok("dup_of_a.jpg" not in d and "already in the archive" in text,
+       "archive duplicate skipped, not copied")
+    ok(not any(k.endswith(".part") for k in d), "no .part temps left")
+    row = conn.execute(
+        "SELECT * FROM archive_files WHERE relpath = ?",
+        (os.path.join("2026", "2026.09 - Copy", "cnew.jpg"),)).fetchone()
+    ok(row is not None and row["hash"] is not None,
+       "copied file upserted into index with its verified digest")
+
+    print("== copy mode: re-run is a no-op ==")
+    code, lines = run(ccfg, conn)
+    text = "\n".join(lines)
+    ok(code == importer.EXIT_OK, "copy re-run exit 0")
+    ok("copied to destination:  0" in text, "copy re-run copies nothing")
+    ok(snapshot(src) == before_src and snapshot(cdest) == d,
+       "copy re-run changed no files")
+
+    print("== copy mode: read-only source ==")
+    os.chmod(src, 0o555)
+    ok(not [i for i in check_import_job(ccfg) if i["severity"] == "error"],
+       "read-only source passes copy-mode preflight")
+    bad = check_import_job({**ccfg, "copy_mode": 0})
+    ok(any(i["code"] == "E_IMP_DUMP_UNREADABLE" for i in bad),
+       "read-only dump fails move-mode preflight")
+    code, lines = run(ccfg, conn)
+    ok(code == importer.EXIT_OK and snapshot(src) == before_src,
+       "copy run works on a read-only source")
+    os.chmod(src, 0o755)
+
+    print("== copy mode: unreadable file skips, run continues ==")
+    locked = os.path.join(src, "Immich", "locked.jpg")
+    write(locked, b"L" * 64)   # size-collides with archive same_size.jpg
+    write(os.path.join(src, "Immich", "cnew2.jpg"), b"COPY-NEW-2")
+    os.chmod(locked, 0o000)
+    code, lines = run(ccfg, conn)
+    text = "\n".join(lines)
+    ok(code == importer.EXIT_SKIPPED_UNSAFE, "unreadable file exits 3")
+    ok("could not be read" in text, "unreadable file reported")
+    ok(snapshot(cdest).get("cnew2.jpg") == b"COPY-NEW-2",
+       "remaining files still copied")
+    os.chmod(locked, 0o644)
+
+    print("== copy mode: overlap config aborts ==")
+    code, lines = run({**ccfg, "dump_path": os.path.join(archive, "2015")},
+                      conn)
+    ok(code == importer.EXIT_PREFLIGHT, "copy overlap config exit 2")
 
     print("== archive duplicate report ==")
     write(os.path.join(archive, "2024", "2024.06 - Trip", "a_copy.jpg"),

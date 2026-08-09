@@ -156,25 +156,41 @@ def _check_warnings(row: dict, source: dict, dest: dict,
 
 def check_import_job(job: dict, index_empty: bool = False) -> list[dict]:
     """Inspect an import-job draft and return issues (same shape as
-    check_binding). `job` carries dump_path / dest_path / archive_root;
-    `index_empty` is True when the archive has no index rows yet (first run).
+    check_binding). `job` carries dump_path / dest_path / archive_root and
+    an optional truthy copy_mode; `index_empty` is True when the archive
+    has no index rows yet (first run).
 
     All three folders must already exist — the import moves and deletes
-    files, so pointing it at a typo'd path must fail loudly, not create
-    folders. The dump must not overlap the archive: the index would then
-    contain the dump's own files and every one of them would count as an
-    already-archived duplicate and be deleted.
+    files (or writes copies of them), so pointing it at a typo'd path must
+    fail loudly, not create folders. The dump must not overlap the archive:
+    the index would then contain the dump's own files and every one of them
+    would count as an already-archived duplicate. In copy mode the source
+    only needs to be readable (an MTP-mounted phone often isn't writable,
+    and nothing on it is ever changed).
     """
     issues: list[dict] = []
     dump = (job.get("dump_path") or "").strip()
     dest = (job.get("dest_path") or "").strip()
     archive = (job.get("archive_root") or "").strip()
+    copy = bool(job.get("copy_mode"))
 
     if not dump or not os.path.isdir(dump):
         issues.append(_err(
             "E_IMP_DUMP_MISSING",
+            f"The source folder can't be found: {dump or '(not set)'}"
+            " — is the phone connected, unlocked and mounted?"
+            if copy else
             f"The dump folder can't be found: {dump or '(not set)'}",
         ))
+    elif copy:
+        # os.access is unreliable on FUSE mounts; probe with a real read.
+        try:
+            os.listdir(dump)
+        except OSError:
+            issues.append(_err(
+                "E_IMP_DUMP_UNREADABLE",
+                f"The source folder can't be read: {dump}",
+            ))
     elif not (os.access(dump, os.R_OK) and os.access(dump, os.W_OK)):
         issues.append(_err(
             "E_IMP_DUMP_UNREADABLE",
@@ -202,12 +218,17 @@ def check_import_job(job: dict, index_empty: bool = False) -> list[dict]:
     if dump and archive and _overlaps(dump, archive):
         issues.append(_err(
             "E_IMP_DUMP_OVERLAPS_ARCHIVE",
+            "The source folder and the archive folder overlap — every file"
+            " would match itself and nothing would ever import."
+            if copy else
             "The dump folder and the archive folder overlap — every dump"
             " file would match itself and be deleted.",
         ))
     if dump and dest and _overlaps(dump, dest):
         issues.append(_err(
             "E_IMP_DUMP_OVERLAPS_DEST",
+            "The source folder and the destination folder overlap."
+            if copy else
             "The dump folder and the destination folder overlap.",
         ))
 
@@ -215,6 +236,10 @@ def check_import_job(job: dict, index_empty: bool = False) -> list[dict]:
             and not _is_within(dest, archive)):
         issues.append(_warn(
             "W_IMP_DEST_OUTSIDE_ARCHIVE",
+            "The destination is outside the archive folder, so copies made"
+            " there won't count as archived — renamed duplicates can be"
+            " copied again on later runs."
+            if copy else
             "The destination is outside the archive folder, so files moved"
             " there won't count as archived on later runs.",
         ))

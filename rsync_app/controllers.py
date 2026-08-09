@@ -124,11 +124,14 @@ class ConnectionsController(QObject):
 
     @staticmethod
     def _import_job_fields(draft: dict) -> dict:
+        def path(key):
+            return os.path.expanduser(str(draft.get(key) or "").strip())
         return {
             "label": str(draft.get("label") or "").strip(),
-            "dump_path": str(draft.get("dump_path") or "").strip(),
-            "dest_path": str(draft.get("dest_path") or "").strip(),
-            "archive_root": str(draft.get("archive_root") or "").strip(),
+            "dump_path": path("dump_path"),
+            "dest_path": path("dest_path"),
+            "archive_root": path("archive_root"),
+            "copy_mode": int(bool(draft.get("copy_mode"))),
         }
 
     @Slot("QVariantMap", result=int)
@@ -709,7 +712,7 @@ class ConnectionsController(QObject):
                 "nodeId": j["id"],
                 "label": j["label"],
                 "depth": 1,
-                "aggregate": "",
+                "aggregate": "copy" if j.get("copy_mode") else "",
                 "liveness": "live" if not errors else "not_mounted",
                 "deviceKind": "",
                 "mountpoint": "",

@@ -7,6 +7,13 @@ Per run, every file in the dump folder is either
     name collisions with different content get " (2)" suffixes), or
   - left in place and reported, when it isn't a media file.
 
+In copy mode (cfg["copy_mode"]) the source tree is never modified: new
+media files are copied to the destination instead of moved, duplicates are
+reported and skipped instead of deleted, and empty source folders are left
+alone. Built for reading a phone straight over an MTP FUSE mount, so a
+single unreadable file skips that file (exit 3) rather than aborting the
+run, and the source's hashes are cached in the index between runs.
+
 The engine half of this module is pure Python (testable headless): it takes
 an open media_index connection plus progress(str)/cancelled() callables and
 returns an exit code. ImportWorker is the thin QThread wrapper the runner
@@ -53,11 +60,14 @@ def _never() -> bool:
 class _Plan:
     """One planned action for one dump file."""
     __slots__ = ("kind", "src", "rel", "size", "mtime_ns", "digest",
-                 "dest_name", "verify_path", "verify_digest", "renamed")
+                 "dest_name", "verify_path", "verify_digest", "renamed",
+                 "note")
 
     def __init__(self, kind, src, rel, size, mtime_ns, **kw):
         self.kind = kind            # move | delete_dup | delete_at_dest
-                                    # | skip_not_media
+                                    # | skip_not_media | skip_error
+                                    # copy mode: copy | skip_dup
+                                    # | skip_at_dest | skip_twin
         self.src = src
         self.rel = rel              # dump-relative, for log lines
         self.size = size
@@ -67,17 +77,21 @@ class _Plan:
         self.verify_path = kw.get("verify_path")    # the surviving copy
         self.verify_digest = kw.get("verify_digest")
         self.renamed = kw.get("renamed", False)
+        self.note = kw.get("note")                  # skip_error detail
 
 
 def run_import(cfg: dict, conn, dry_run: bool,
                progress=print, cancelled=_never) -> int:
-    """cfg carries dump_path / dest_path / archive_root (absolute)."""
+    """cfg carries dump_path / dest_path / archive_root (absolute) and an
+    optional truthy copy_mode."""
     dump = os.path.realpath(cfg["dump_path"])
     dest = os.path.realpath(cfg["dest_path"])
     archive = os.path.realpath(cfg["archive_root"])
+    copy = bool(cfg.get("copy_mode"))
 
     errors = [i for i in check_import_job(
-        {"dump_path": dump, "dest_path": dest, "archive_root": archive})
+        {"dump_path": dump, "dest_path": dest, "archive_root": archive,
+         "copy_mode": copy})
         if i["severity"] == "error"]
     if errors:
         for issue in errors:
@@ -88,24 +102,32 @@ def run_import(cfg: dict, conn, dry_run: bool,
     progress(f"Scanning archive: {archive}")
     n = hash_index.refresh(conn, archive, progress, cancelled)
     progress(f"Archive index ready: {n:,} files.")
+    if copy and not cancelled():
+        # Cache source hashes between runs too: on an MTP mount every
+        # already-imported file size-collides with its archive copy, and
+        # without the cache each run would re-read it all over USB.
+        progress(f"Scanning source folder: {dump}")
+        hash_index.refresh(conn, dump, progress, cancelled)
     if cancelled():
         return EXIT_OK
 
-    plans = _plan(dump, dest, archive, conn, progress, cancelled)
+    plans = _plan(dump, dest, archive, conn, progress, cancelled, copy)
     if dry_run:
         for p in plans:
             progress(_line(p, dry_run=True))
-        _summary(plans, 0, progress, dry_run=True)
+        _summary(plans, 0, progress, dry_run=True, copy=copy)
         return EXIT_OK
 
     unsafe = 0
     for p in plans:
         if cancelled():
-            progress("Cancelled — remaining files were left in the dump.")
+            progress("Cancelled — remaining files were not copied."
+                     if copy else
+                     "Cancelled — remaining files were left in the dump.")
             break
         unsafe += _execute(p, conn, archive, dest, progress)
-    removed_dirs = _prune_empty_dirs(dump)
-    _summary(plans, removed_dirs, progress, dry_run=False)
+    removed_dirs = 0 if copy else _prune_empty_dirs(dump)
+    _summary(plans, removed_dirs, progress, dry_run=False, copy=copy)
     return EXIT_SKIPPED_UNSAFE if unsafe else EXIT_OK
 
 
@@ -141,15 +163,29 @@ def run_dup_report(cfg: dict, conn, progress=print, cancelled=_never) -> int:
 
 # --- planning ---------------------------------------------------------------
 
-def _plan(dump, dest, archive, conn, progress, cancelled) -> list[_Plan]:
-    files = _scan_dump(dump)
-    progress(f"Dump folder: {len(files):,} files to check.")
+def _plan(dump, dest, archive, conn, progress, cancelled,
+          copy=False) -> list[_Plan]:
+    files, unreadable = _scan_dump(dump)
+    label = "Source" if copy else "Dump"
+    progress(f"{label} folder: {len(files):,} files to check.")
     try:
         dest_names = set(os.listdir(dest))
     except OSError:
         dest_names = set()
-    claimed: dict[str, _Plan] = {}   # dest name -> move plan that took it
-    plans: list[_Plan] = []
+    claimed: dict[str, _Plan] = {}   # dest name -> move/copy plan that took it
+    plans: list[_Plan] = [
+        _Plan("skip_error", full, rel, 0, 0, note=note)
+        for full, rel, note in unreadable
+    ]
+
+    def src_digest(src, rel, size, mtime_ns):
+        """Hash a dump file; in copy mode through the index cache, so an
+        unchanged source file is only ever read over USB once."""
+        if not copy:
+            return hash_index.hash_file(src, cancelled)
+        row = hash_index.get_row(conn, dump, rel) or {
+            "relpath": rel, "size": size, "mtime_ns": mtime_ns, "hash": None}
+        return hash_index.ensure_hash(conn, dump, row, cancelled)
 
     for src, rel, size, mtime_ns in files:
         if cancelled():
@@ -158,20 +194,27 @@ def _plan(dump, dest, archive, conn, progress, cancelled) -> list[_Plan]:
 
         # 1. Already in the archive? Content wins over everything.
         match = None
-        for row in hash_index.by_size(conn, archive, size):
-            if digest is None:
-                digest = hash_index.hash_file(src, cancelled)
+        try:
+            for row in hash_index.by_size(conn, archive, size):
                 if digest is None:
+                    digest = src_digest(src, rel, size, mtime_ns)
+                    if digest is None:
+                        break
+                row_digest = hash_index.ensure_hash(
+                    conn, archive, row, cancelled)
+                if row_digest is not None and row_digest == digest:
+                    match = row
                     break
-            row_digest = hash_index.ensure_hash(conn, archive, row, cancelled)
-            if row_digest is not None and row_digest == digest:
-                match = row
-                break
+        except OSError as e:
+            plans.append(_Plan("skip_error", src, rel, size, mtime_ns,
+                               note=str(e)))
+            continue
         if digest is None and cancelled():
             break
         if match is not None:
             plans.append(_Plan(
-                "delete_dup", src, rel, size, mtime_ns, digest=digest,
+                "skip_dup" if copy else "delete_dup",
+                src, rel, size, mtime_ns, digest=digest,
                 dest_name=match["relpath"],
                 verify_path=os.path.join(archive, match["relpath"]),
                 verify_digest=digest,
@@ -184,18 +227,24 @@ def _plan(dump, dest, archive, conn, progress, cancelled) -> list[_Plan]:
             continue
 
         # 3. Find a free name at the destination (or discover the file is
-        #    already there / already being moved by this run).
+        #    already there / already being brought over by this run).
         name = os.path.basename(src)
         plan = None
+        error = None
         while name in dest_names or name in claimed:
             other_path = os.path.join(dest, name)
-            if name in claimed:
-                # Another dump file is already being moved to this name; it
-                # is still at its dump location, so hash it there.
+            twin = name in claimed
+            if twin:
+                # Another dump file is already taking this name; it is
+                # still at its dump location, so hash it there.
                 other = claimed[name]
                 other_size, other_digest = other.size, other.digest
                 if other_size == size and other_digest is None:
-                    other.digest = hash_index.hash_file(other.src, cancelled)
+                    try:
+                        other.digest = src_digest(
+                            other.src, other.rel, other.size, other.mtime_ns)
+                    except OSError:
+                        other.digest = None
                     other_digest = other.digest
             else:
                 try:
@@ -211,19 +260,37 @@ def _plan(dump, dest, archive, conn, progress, cancelled) -> list[_Plan]:
                         other_digest = None
             if other_size == size:
                 if digest is None:
-                    digest = hash_index.hash_file(src, cancelled)
+                    try:
+                        digest = src_digest(src, rel, size, mtime_ns)
+                    except OSError as e:
+                        error = str(e)
+                        break
                 if digest is not None and digest == other_digest:
-                    # Identical content will already be at other_path by the
-                    # time this delete runs (plans execute in this order).
-                    plan = _Plan(
-                        "delete_at_dest", src, rel, size, mtime_ns,
-                        digest=digest, dest_name=name,
-                        verify_path=other_path, verify_digest=digest,
-                    )
+                    if copy:
+                        # Nothing to do — the content is (or will be) at
+                        # other_path; the source file stays put.
+                        plan = _Plan(
+                            "skip_twin" if twin else "skip_at_dest",
+                            src, rel, size, mtime_ns, digest=digest,
+                            dest_name=other.rel if twin else name,
+                        )
+                    else:
+                        # Identical content will already be at other_path by
+                        # the time this delete runs (plans execute in order).
+                        plan = _Plan(
+                            "delete_at_dest", src, rel, size, mtime_ns,
+                            digest=digest, dest_name=name,
+                            verify_path=other_path, verify_digest=digest,
+                        )
                     break
             name = _next_name(name, dest_names, claimed)
+        if error is not None:
+            plans.append(_Plan("skip_error", src, rel, size, mtime_ns,
+                               note=error))
+            continue
         if plan is None:
-            plan = _Plan("move", src, rel, size, mtime_ns, digest=digest,
+            plan = _Plan("copy" if copy else "move",
+                         src, rel, size, mtime_ns, digest=digest,
                          dest_name=name,
                          renamed=(name != os.path.basename(src)))
             claimed[name] = plan
@@ -231,18 +298,27 @@ def _plan(dump, dest, archive, conn, progress, cancelled) -> list[_Plan]:
     return plans
 
 
-def _scan_dump(dump: str) -> list[tuple]:
-    files = []
+def _scan_dump(dump: str) -> tuple[list[tuple], list[tuple]]:
+    """Regular files under dump, plus a list of entries that could not be
+    statted (flaky MTP reads must cost one file, not the run)."""
+    files, unreadable = [], []
     for dirpath, _dirnames, filenames in os.walk(dump):
         for fname in filenames:
+            if fname.endswith(".part"):   # our own copy temps
+                continue
             full = os.path.join(dirpath, fname)
             if os.path.islink(full) or not os.path.isfile(full):
                 continue
-            st = os.stat(full)
+            try:
+                st = os.stat(full)
+            except OSError as e:
+                unreadable.append(
+                    (full, os.path.relpath(full, dump), str(e)))
+                continue
             files.append((full, os.path.relpath(full, dump),
                           st.st_size, st.st_mtime_ns))
     files.sort(key=lambda f: f[1])
-    return files
+    return files, unreadable
 
 
 def _next_name(name: str, dest_names: set, claimed: dict) -> str:
@@ -263,16 +339,23 @@ def _next_name(name: str, dest_names: set, claimed: dict) -> str:
 def _execute(p: _Plan, conn, archive: str, dest: str, progress) -> int:
     """Carry out one planned action. Returns 1 when the action had to be
     skipped for safety, else 0."""
-    if p.kind == "skip_not_media":
-        progress(_line(p, dry_run=False))
+    if p.kind in ("skip_not_media", "skip_dup", "skip_at_dest", "skip_twin"):
+        progress(_line(p, dry_run=False))     # nothing touches the source
         return 0
+    if p.kind == "skip_error":
+        progress(_line(p, dry_run=False))
+        return 1
     try:
         st = os.stat(p.src)
     except OSError:
         progress(f"skip  {p.rel} — disappeared during the run")
         return 1
-    if (st.st_size, st.st_mtime_ns) != (p.size, p.mtime_ns):
-        progress(f"skip  {p.rel} — changed during the run, left in the dump")
+    # Copies check size only: MTP mtimes are coarse and unstable, and the
+    # copy itself verifies content. Moves/deletes keep the strict guard.
+    changed = (st.st_size != p.size if p.kind == "copy" else
+               (st.st_size, st.st_mtime_ns) != (p.size, p.mtime_ns))
+    if changed:
+        progress(f"skip  {p.rel} — changed during the run, skipped")
         return 1
 
     if p.kind in ("delete_dup", "delete_at_dest"):
@@ -284,22 +367,30 @@ def _execute(p: _Plan, conn, archive: str, dest: str, progress) -> int:
         progress(_line(p, dry_run=False))
         return 0
 
-    # move
     dst = os.path.join(dest, p.dest_name)
     if os.path.exists(dst):
         progress(f"skip  {p.rel} — a new file appeared at the destination"
-                 " with this name, left in the dump")
+                 " with this name, skipped")
         return 1
-    try:
-        os.rename(p.src, dst)
-    except OSError as e:
-        if e.errno != errno.EXDEV:
-            raise
-        _copy_verify_remove(p.src, dst)
+    if p.kind == "copy":
+        try:
+            digest = _copy_verify(p.src, dst, p.size)
+        except OSError as e:
+            progress(f"skip  {p.rel} — could not copy: {e}")
+            return 1
+    else:  # move
+        digest = p.digest
+        try:
+            os.rename(p.src, dst)
+        except OSError as e:
+            if e.errno != errno.EXDEV:
+                raise
+            digest = _copy_verify(p.src, dst, p.size)
+            os.remove(p.src)
     if _is_within(dst, archive):
         st = os.stat(dst)
         hash_index.upsert_file(conn, archive, os.path.relpath(dst, archive),
-                               st.st_size, st.st_mtime_ns, p.digest)
+                               st.st_size, st.st_mtime_ns, digest)
     progress(_line(p, dry_run=False))
     return 0
 
@@ -318,18 +409,33 @@ def _surviving_copy_ok(p: _Plan) -> bool:
     return digest == p.verify_digest
 
 
-def _copy_verify_remove(src: str, dst: str) -> None:
-    """Cross-filesystem move: copy to .part, verify content, swap in, then
-    remove the source. Never leaves a half-written file under the final name."""
+def _copy_verify(src: str, dst: str, expected_size: int) -> bytes:
+    """Copy src to dst via a .part temp, verifying content, and return the
+    verified digest. One read of the source (it may sit on a slow MTP
+    mount): the copy loop feeds the digest, then the landed temp is
+    re-hashed locally and must match. Never leaves a half-written file
+    under the final name, and cleans up its temp on any failure."""
     part = dst + ".part"
-    src_digest = hash_index.hash_file(src)
-    shutil.copyfile(src, part)
-    if hash_index.hash_file(part) != src_digest:
-        os.remove(part)
-        raise OSError(f"copy verification failed for {src}")
-    shutil.copystat(src, part)
-    os.rename(part, dst)
-    os.remove(src)
+    try:
+        src_digest = hash_index.copy_hash(src, part)
+        st = os.stat(part)
+        if st.st_size != expected_size:
+            raise OSError(f"short read copying {src}"
+                          f" ({st.st_size} of {expected_size} bytes)")
+        if hash_index.hash_file(part) != src_digest:
+            raise OSError(f"copy verification failed for {src}")
+        try:
+            shutil.copystat(src, part)   # keep timestamps when the source
+        except OSError:                  # filesystem can serve them
+            pass
+        os.rename(part, dst)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    return src_digest
 
 
 def _prune_empty_dirs(dump: str) -> int:
@@ -364,28 +470,48 @@ def _line(p: _Plan, dry_run: bool) -> str:
     if p.kind == "delete_at_dest":
         return (f"dup   {p.rel} — already at the destination —"
                 f" {would}delete from dump")
+    if p.kind == "skip_dup":
+        return (f"dup   {p.rel} == {p.dest_name} — already in the archive,"
+                " left on source")
+    if p.kind == "skip_at_dest":
+        return (f"dup   {p.rel} — already at the destination,"
+                " left on source")
+    if p.kind == "skip_twin":
+        return (f"dup   {p.rel} — identical to {p.dest_name} in this"
+                " import, left on source")
     if p.kind == "skip_not_media":
-        return f"skip  {p.rel} — not a media file, left in the dump"
+        return f"skip  {p.rel} — not a media file, left where it is"
+    if p.kind == "skip_error":
+        return f"skip  {p.rel} — could not be read ({p.note})"
+    verb = "copy" if p.kind == "copy" else "move"
     suffix = f" (renamed, {p.dest_name} was taken)" if p.renamed else ""
-    return f"move  {p.rel} → {p.dest_name}{suffix}"
+    return f"{verb}  {p.rel} → {p.dest_name}{suffix}"
 
 
-def _summary(plans: list, removed_dirs: int, progress, dry_run: bool) -> None:
-    moved = [p for p in plans if p.kind == "move"]
-    dups = sum(1 for p in plans if p.kind == "delete_dup")
-    at_dest = sum(1 for p in plans if p.kind == "delete_at_dest")
+def _summary(plans: list, removed_dirs: int, progress, dry_run: bool,
+             copy: bool = False) -> None:
+    brought = [p for p in plans if p.kind in ("move", "copy")]
+    dups = sum(1 for p in plans if p.kind in ("delete_dup", "skip_dup"))
+    at_dest = sum(1 for p in plans
+                  if p.kind in ("delete_at_dest", "skip_at_dest",
+                                "skip_twin"))
     skipped = sum(1 for p in plans if p.kind == "skip_not_media")
-    renamed = sum(1 for p in moved if p.renamed)
+    errors = sum(1 for p in plans if p.kind == "skip_error")
+    renamed = sum(1 for p in brought if p.renamed)
     title = "What would happen" if dry_run else "Import finished"
     progress("")
     progress(f"=== {title} ===")
-    progress(f"moved to destination:   {len(moved)}"
-             f" ({_fmt_bytes(sum(p.size for p in moved))})")
-    progress(f"duplicates deleted:     {dups + at_dest}"
+    verb = "copied" if copy else "moved"
+    progress(f"{verb} to destination:".ljust(24) + f"{len(brought)}"
+             f" ({_fmt_bytes(sum(p.size for p in brought))})")
+    dup_verb = "skipped" if copy else "deleted"
+    progress(f"duplicates {dup_verb}:".ljust(24) + f"{dups + at_dest}"
              f" ({dups} in archive, {at_dest} at destination)")
     progress(f"renamed on collision:   {renamed}")
     progress(f"not media, left alone:  {skipped}")
-    if not dry_run:
+    if errors:
+        progress(f"could not be read:      {errors}")
+    if not dry_run and not copy:
         progress(f"empty folders removed:  {removed_dirs}")
 
 

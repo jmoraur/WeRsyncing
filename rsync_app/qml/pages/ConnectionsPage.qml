@@ -111,6 +111,7 @@ Item {
             importJobForm.initialDump = row.dump_path || ""
             importJobForm.initialDest = row.dest_path || ""
             importJobForm.initialArchive = row.archive_root || ""
+            importJobForm.initialCopyMode = row.copy_mode || 0
             importJobForm.open()
         }
     }
@@ -121,6 +122,7 @@ Item {
         importJobForm.initialDump = ""
         importJobForm.initialDest = ""
         importJobForm.initialArchive = ""
+        importJobForm.initialCopyMode = 0
         importJobForm.open()
     }
 

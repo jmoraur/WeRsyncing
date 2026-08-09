@@ -4,11 +4,13 @@ import QtQuick.Layouts
 import Qt.labs.platform as Labs
 import "../components"
 
-// Import-job dialog: a label plus three folders — the dump folder (where
-// phone media gets unloaded), the destination folder (where new files are
-// moved to), and the archive root (what "already have it" is checked
-// against). The destination is meant to be repointed over time (new year /
-// event folder); the rest rarely changes.
+// Import-job dialog: a label, a mode, plus three folders — the source/dump
+// folder (where phone media comes from), the destination folder (where new
+// files land), and the archive root (what "already have it" is checked
+// against). In "Move & clean" the source is emptied (dups deleted, new
+// files moved out); in "Copy only" the source is never touched — made for
+// reading a mounted phone directly. The destination is meant to be
+// repointed over time (new year / event folder); the rest rarely changes.
 //
 // Modes: importJobId === -1 → add, else → edit.
 Dialog {
@@ -23,6 +25,9 @@ Dialog {
     property string initialDump: ""
     property string initialDest: ""
     property string initialArchive: ""
+    property int initialCopyMode: 0
+
+    property bool copyMode: false
 
     // Live preflight of the current field values (display-only).
     property var issues: []
@@ -33,6 +38,7 @@ Dialog {
             dump_path: dumpField.text.trim(),
             dest_path: destField.text.trim(),
             archive_root: archiveField.text.trim(),
+            copy_mode: dlg.copyMode ? 1 : 0,
         }
     }
 
@@ -45,6 +51,7 @@ Dialog {
         dumpField.text = dlg.initialDump
         destField.text = dlg.initialDest
         archiveField.text = dlg.initialArchive
+        dlg.copyMode = dlg.initialCopyMode === 1
         dlg._refreshIssues()
         labelField.forceActiveFocus()
     }
@@ -70,7 +77,37 @@ Dialog {
         }
 
         SectionLabel {
-            text: "DUMP FOLDER  ·  where you unload the phone"
+            text: "MODE"
+            Layout.topMargin: Theme.s1
+        }
+        SegmentedControl {
+            model: [
+                { value: "move", label: "Move & clean" },
+                { value: "copy", label: "Copy only" },
+            ]
+            value: dlg.copyMode ? "copy" : "move"
+            onActivated: newValue => {
+                dlg.copyMode = (newValue === "copy")
+                dlg._refreshIssues()
+            }
+        }
+        Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.65
+            font.pixelSize: Theme.fsSmall
+            text: dlg.copyMode
+                  ? "New files are copied out; nothing in the source folder"
+                    + " is ever changed or deleted. Made for importing"
+                    + " straight off a mounted phone."
+                  : "Duplicates are deleted from the dump folder and new"
+                    + " files are moved out of it, leaving it empty."
+        }
+
+        SectionLabel {
+            text: dlg.copyMode
+                  ? "SOURCE  ·  scanned, never changed"
+                  : "DUMP FOLDER  ·  where you unload the phone"
             Layout.topMargin: Theme.s1
         }
         RowLayout {
@@ -79,7 +116,9 @@ Dialog {
             TextField {
                 id: dumpField
                 Layout.fillWidth: true
-                placeholderText: "/home/me/Pictures/Phone-Camera"
+                placeholderText: dlg.copyMode
+                                 ? "/home/me/Phone/Internal storage/DCIM/…"
+                                 : "/home/me/Pictures/Phone-Camera"
                 font.family: Theme.mono
                 font.pixelSize: Theme.fsMono
                 onTextChanged: dlg._refreshIssues()
@@ -92,7 +131,9 @@ Dialog {
         }
 
         SectionLabel {
-            text: "DESTINATION  ·  where new files are moved to"
+            text: dlg.copyMode
+                  ? "DESTINATION  ·  where new files are copied to"
+                  : "DESTINATION  ·  where new files are moved to"
             Layout.topMargin: Theme.s1
         }
         RowLayout {

@@ -260,12 +260,35 @@ def main() -> int:
     add("11b_import_job_form_errors", open_ijf_err)
     add("__close", lambda: close_dialog(ijf_err["dlg"]))
 
+    # 11c. ImportJobForm in copy mode (source/destination labels switch,
+    # copy-only helper text).
+    ijf_copy = {"dlg": None}
+    def open_ijf_copy():
+        ijf_copy["dlg"] = open_dialog("importJobForm",
+                                      {"importJobId": iid,
+                                       "initialLabel": "Phone-photos-SMOKE",
+                                       "initialDump": str(imp_dump),
+                                       "initialDest": str(imp_dest),
+                                       "initialArchive": str(imp_archive),
+                                       "initialCopyMode": 1})
+    add("11c_import_job_form_copy", open_ijf_copy)
+    add("__close", lambda: close_dialog(ijf_copy["dlg"]))
+
     # 12. ImportConfirmDialog (loads the job via jobId on open).
     icd_state = {"dlg": None}
     def open_icd():
         icd_state["dlg"] = open_dialog("importConfirmDialog", {"jobId": iid})
     add("12_import_confirm", open_icd)
     add("__close", lambda: close_dialog(icd_state["dlg"]))
+
+    # 12b. ImportConfirmDialog for a copy-mode job (no-deletion prose).
+    icd_copy = {"dlg": None}
+    def open_icd_copy():
+        db.update_import_job(iid, copy_mode=1)
+        icd_copy["dlg"] = open_dialog("importConfirmDialog", {"jobId": iid})
+    add("12b_import_confirm_copy", open_icd_copy)
+    add("__close", lambda: (close_dialog(icd_copy["dlg"]),
+                            db.update_import_job(iid, copy_mode=0)))
 
     DELAY_MS = 400
     idx = {"i": 0}

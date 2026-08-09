@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.5.0
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,12 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Sun Aug 09 2026 Jan Moraru <jan@moraru.ch> - 0.6.0-1
+- Import jobs gain a copy mode for importing straight off a mounted
+  phone: the source is never modified — new files are copied (verified)
+  to the destination, duplicates are reported and skipped, and single
+  unreadable files no longer abort the run
+
 * Sun Aug 09 2026 Jan Moraru <jan@moraru.ch> - 0.5.0-1
 - New media-import job type: dedup a phone dump folder against the photo
   archive (size + blake2b-256), delete exact duplicates from the dump,

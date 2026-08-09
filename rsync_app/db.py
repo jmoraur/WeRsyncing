@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     label        TEXT NOT NULL,
     dump_path    TEXT NOT NULL,
     dest_path    TEXT NOT NULL,
-    archive_root TEXT NOT NULL
+    archive_root TEXT NOT NULL,
+    copy_mode    INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))
 );
 """
 
@@ -125,6 +126,7 @@ class Database(QObject):
         self._migrate_baseline_opts()
         self._migrate_source_unique()
         self._migrate_options_ux()
+        self._migrate_import_copy_mode()
         self._conn.commit()
 
     def _migrate_baseline_opts(self) -> None:
@@ -143,6 +145,17 @@ class Database(QObject):
                     f"ALTER TABLE bindings ADD COLUMN {col} "
                     f"INTEGER NOT NULL DEFAULT 1 CHECK ({col} IN (0, 1))"
                 )
+
+    def _migrate_import_copy_mode(self) -> None:
+        """Add copy_mode to a pre-existing import_jobs table (0 = the
+        original move-and-clean behavior)."""
+        have = {row["name"] for row in
+                self._conn.execute("PRAGMA table_info(import_jobs)")}
+        if "copy_mode" not in have:
+            self._conn.execute(
+                "ALTER TABLE import_jobs ADD COLUMN copy_mode "
+                "INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))"
+            )
 
     def _migrate_source_unique(self) -> None:
         """Move the UNIQUE constraint on source_labels from label to path.
@@ -398,20 +411,24 @@ class Database(QObject):
     # --- import_jobs --------------------------------------------------------
 
     def add_import_job(self, *, label: str, dump_path: str, dest_path: str,
-                       archive_root: str) -> int:
+                       archive_root: str, copy_mode: int = 0) -> int:
         cur = self._conn.execute(
-            "INSERT INTO import_jobs(label, dump_path, dest_path, archive_root)"
-            " VALUES (?, ?, ?, ?)",
-            (label, dump_path, dest_path, archive_root),
+            "INSERT INTO import_jobs(label, dump_path, dest_path, archive_root,"
+            " copy_mode) VALUES (?, ?, ?, ?, ?)",
+            (label, dump_path, dest_path, archive_root, int(bool(copy_mode))),
         )
         self._conn.commit()
         self.db_changed.emit()
         return cur.lastrowid
 
     def update_import_job(self, job_id: int, *, label=_UNSET, dump_path=_UNSET,
-                          dest_path=_UNSET, archive_root=_UNSET) -> None:
+                          dest_path=_UNSET, archive_root=_UNSET,
+                          copy_mode=_UNSET) -> None:
+        if copy_mode is not _UNSET:
+            copy_mode = int(bool(copy_mode))
         changes = self._collect_changes(
-            ["label", "dump_path", "dest_path", "archive_root"], locals()
+            ["label", "dump_path", "dest_path", "archive_root", "copy_mode"],
+            locals(),
         )
         self._apply_update("import_jobs", job_id, changes)
 

@@ -29,11 +29,15 @@ command it is about to execute.
   per-connection defaults and per-run overrides. Structured `--chown`/`--chmod`
   support for NAS-style destinations, excludes, custom `--rsh`.
 - **Media imports.** A second job type for photo/video archives: point it at
-  a dump folder (where the phone gets unloaded), an archive, and a
-  destination. New files are moved to the destination; files already in the
-  archive (verified byte-identical, size + blake2b-256, re-checked right
-  before deletion) are deleted from the dump. Includes a dry-run mode and a
-  report-only duplicate finder for the archive itself.
+  a source folder, an archive, and a destination. In *move* mode the source
+  is a dump folder that gets cleaned out — new files are moved to the
+  destination; files already in the archive (verified byte-identical,
+  size + blake2b-256, re-checked right before deletion) are deleted. In
+  *copy* mode the source is never touched — made for importing straight off
+  a phone on an MTP mount: new files are copied over (verified), duplicates
+  are just reported, and single unreadable files don't abort the run.
+  Includes a dry-run mode and a report-only duplicate finder for the
+  archive itself.
 
 ## Install (Fedora)
 
@@ -77,9 +81,11 @@ Built for a single user on Fedora KDE. Local USB disks and rsync-over-SSH
 remotes only — no SSHFS/NFS/CIFS mount management, no scheduling daemon, no
 sync history database. For sync connections, the app manages and runs
 commands and your data is only ever touched by plain `rsync`. The one
-exception is the media-import feature, which moves and deletes files in your
-dump folder itself — guarded by content verification, a pre-delete re-check,
-and a first-class dry run.
+exception is the media-import feature: in move mode it moves and deletes
+files in your dump folder itself — guarded by content verification, a
+pre-delete re-check, and a first-class dry run — while in copy mode it only
+ever writes verified copies into the destination and never modifies the
+source.
 
 ## License
 
