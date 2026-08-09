@@ -6,7 +6,7 @@ local/remote destinations, and device-level rsh.
 """
 from rsync_app.rsync import build_rsync_argv
 
-SRC = {"kind": "local", "base": "/home/jm/Pictures", "subpath": ""}
+SRC = {"kind": "local", "base": "/home/user/Pictures", "subpath": ""}
 DEST_LOCAL = {"kind": "local", "base": "/mnt/backup", "subpath": "photos"}
 DEST_REMOTE = {"kind": "remote", "base": "root@10.0.0.5:/mnt/user",
                "subpath": "media", "rsh": "ssh -p 2222"}
