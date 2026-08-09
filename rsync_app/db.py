@@ -89,6 +89,14 @@ CREATE TABLE IF NOT EXISTS dest_devices (
 );
 
 {_bindings_ddl("bindings", if_not_exists=True)}
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+    id           INTEGER PRIMARY KEY,
+    label        TEXT NOT NULL,
+    dump_path    TEXT NOT NULL,
+    dest_path    TEXT NOT NULL,
+    archive_root TEXT NOT NULL
+);
 """
 
 
@@ -386,6 +394,40 @@ class Database(QObject):
 
     def list_bindings(self) -> list[dict]:
         return [dict(r) for r in self._conn.execute("SELECT * FROM bindings")]
+
+    # --- import_jobs --------------------------------------------------------
+
+    def add_import_job(self, *, label: str, dump_path: str, dest_path: str,
+                       archive_root: str) -> int:
+        cur = self._conn.execute(
+            "INSERT INTO import_jobs(label, dump_path, dest_path, archive_root)"
+            " VALUES (?, ?, ?, ?)",
+            (label, dump_path, dest_path, archive_root),
+        )
+        self._conn.commit()
+        self.db_changed.emit()
+        return cur.lastrowid
+
+    def update_import_job(self, job_id: int, *, label=_UNSET, dump_path=_UNSET,
+                          dest_path=_UNSET, archive_root=_UNSET) -> None:
+        changes = self._collect_changes(
+            ["label", "dump_path", "dest_path", "archive_root"], locals()
+        )
+        self._apply_update("import_jobs", job_id, changes)
+
+    def delete_import_job(self, job_id: int) -> None:
+        self._conn.execute(
+            "DELETE FROM import_jobs WHERE id = ?", (job_id,)
+        )
+        self._conn.commit()
+        self.db_changed.emit()
+
+    def list_import_jobs(self) -> list[dict]:
+        return [
+            dict(r) for r in self._conn.execute(
+                "SELECT * FROM import_jobs ORDER BY label"
+            )
+        ]
 
     # --- helpers ------------------------------------------------------------
 

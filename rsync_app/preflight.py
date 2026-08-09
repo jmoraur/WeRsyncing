@@ -154,6 +154,94 @@ def _check_warnings(row: dict, source: dict, dest: dict,
             ))
 
 
+def check_import_job(job: dict, index_empty: bool = False) -> list[dict]:
+    """Inspect an import-job draft and return issues (same shape as
+    check_binding). `job` carries dump_path / dest_path / archive_root;
+    `index_empty` is True when the archive has no index rows yet (first run).
+
+    All three folders must already exist — the import moves and deletes
+    files, so pointing it at a typo'd path must fail loudly, not create
+    folders. The dump must not overlap the archive: the index would then
+    contain the dump's own files and every one of them would count as an
+    already-archived duplicate and be deleted.
+    """
+    issues: list[dict] = []
+    dump = (job.get("dump_path") or "").strip()
+    dest = (job.get("dest_path") or "").strip()
+    archive = (job.get("archive_root") or "").strip()
+
+    if not dump or not os.path.isdir(dump):
+        issues.append(_err(
+            "E_IMP_DUMP_MISSING",
+            f"The dump folder can't be found: {dump or '(not set)'}",
+        ))
+    elif not (os.access(dump, os.R_OK) and os.access(dump, os.W_OK)):
+        issues.append(_err(
+            "E_IMP_DUMP_UNREADABLE",
+            f"The app needs to read and change the dump folder: {dump}",
+        ))
+
+    if not dest or not os.path.isdir(dest):
+        issues.append(_err(
+            "E_IMP_DEST_MISSING",
+            f"The destination folder can't be found: {dest or '(not set)'}"
+            " — create it first, it is not created automatically.",
+        ))
+    elif not os.access(dest, os.W_OK):
+        issues.append(_err(
+            "E_IMP_DEST_UNWRITABLE",
+            f"The destination folder can't be written to: {dest}",
+        ))
+
+    if not archive or not os.path.isdir(archive):
+        issues.append(_err(
+            "E_IMP_ARCHIVE_MISSING",
+            f"The archive folder can't be found: {archive or '(not set)'}",
+        ))
+
+    if dump and archive and _overlaps(dump, archive):
+        issues.append(_err(
+            "E_IMP_DUMP_OVERLAPS_ARCHIVE",
+            "The dump folder and the archive folder overlap — every dump"
+            " file would match itself and be deleted.",
+        ))
+    if dump and dest and _overlaps(dump, dest):
+        issues.append(_err(
+            "E_IMP_DUMP_OVERLAPS_DEST",
+            "The dump folder and the destination folder overlap.",
+        ))
+
+    if (dest and archive and os.path.isdir(dest) and os.path.isdir(archive)
+            and not _is_within(dest, archive)):
+        issues.append(_warn(
+            "W_IMP_DEST_OUTSIDE_ARCHIVE",
+            "The destination is outside the archive folder, so files moved"
+            " there won't count as archived on later runs.",
+        ))
+
+    if index_empty and archive and os.path.isdir(archive):
+        issues.append(_warn(
+            "W_IMP_INDEX_EMPTY",
+            "The archive hasn't been scanned yet — the first run reads"
+            " every archive file that matches a dump file's size, which"
+            " can take a while.",
+        ))
+    return issues
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return _is_within(a, b) or _is_within(b, a)
+
+
+def _is_within(inner: str, outer: str) -> bool:
+    inner = os.path.realpath(inner)
+    outer = os.path.realpath(outer)
+    try:
+        return os.path.commonpath([inner, outer]) == outer
+    except ValueError:
+        return False
+
+
 def _resolved_dest_path(dest: dict) -> str:
     base = (dest.get("base") or "").rstrip("/")
     subpath = (dest.get("subpath") or "").strip("/")

@@ -31,7 +31,11 @@ def main() -> int:
     QQuickStyle.setStyle("Fusion")
 
     db = Database()
-    smoke_src = str(Path.home() / "Pictures")
+    # A fixture path of our own — a real user folder (e.g. ~/Pictures) may
+    # already be registered as a source, and source paths are UNIQUE.
+    smoke_src_dir = OUT / "source-fixture"
+    smoke_src_dir.mkdir(parents=True, exist_ok=True)
+    smoke_src = str(smoke_src_dir)
     sid = db.add_source_label(label="Photos-SMOKE", path=smoke_src)
     cid = db.add_dest_container(label="HDD-case-SMOKE")
     did = db.add_dest_device(container_id=cid, label="Backup-SMOKE",
@@ -57,6 +61,18 @@ def main() -> int:
                            "chown_mode": "custom",
                            "chown_value": "nobody:users",
                            "chmod_value": "D755,F644"})
+    # Import-job fixture: real folders so the confirm dialog preflights
+    # clean (bar the archive-not-scanned warning, which we want visible).
+    imp_root = OUT / "import-fixture"
+    imp_dump = imp_root / "dump"
+    imp_archive = imp_root / "archive"
+    imp_dest = imp_archive / "2026" / "2026.08 - Smoke Event"
+    imp_dump.mkdir(parents=True, exist_ok=True)
+    imp_dest.mkdir(parents=True, exist_ok=True)
+    iid = db.add_import_job(label="Phone-photos-SMOKE",
+                            dump_path=str(imp_dump),
+                            dest_path=str(imp_dest),
+                            archive_root=str(imp_archive))
 
     watcher = MountWatcher()
     probes = RemoteProbeWatcher(db)
@@ -220,6 +236,37 @@ def main() -> int:
     add("10_sync_confirm_multi", open_scm)
     add("__close", lambda: close_dialog(scm_state["dlg"]))
 
+    # 11. ImportJobForm (edit — clean paths, live preflight issue list).
+    ijf_state = {"dlg": None}
+    def open_ijf():
+        ijf_state["dlg"] = open_dialog("importJobForm",
+                                       {"importJobId": iid,
+                                        "initialLabel": "Phone-photos-SMOKE",
+                                        "initialDump": str(imp_dump),
+                                        "initialDest": str(imp_dest),
+                                        "initialArchive": str(imp_archive)})
+    add("11_import_job_form", open_ijf)
+    add("__close", lambda: close_dialog(ijf_state["dlg"]))
+
+    # 11b. ImportJobForm (new — empty fields, all three errors render).
+    ijf_err = {"dlg": None}
+    def open_ijf_err():
+        ijf_err["dlg"] = open_dialog("importJobForm",
+                                     {"importJobId": -1,
+                                      "initialLabel": "",
+                                      "initialDump": str(imp_dump) + "-missing",
+                                      "initialDest": "",
+                                      "initialArchive": ""})
+    add("11b_import_job_form_errors", open_ijf_err)
+    add("__close", lambda: close_dialog(ijf_err["dlg"]))
+
+    # 12. ImportConfirmDialog (loads the job via jobId on open).
+    icd_state = {"dlg": None}
+    def open_icd():
+        icd_state["dlg"] = open_dialog("importConfirmDialog", {"jobId": iid})
+    add("12_import_confirm", open_icd)
+    add("__close", lambda: close_dialog(icd_state["dlg"]))
+
     DELAY_MS = 400
     idx = {"i": 0}
 
@@ -247,6 +294,9 @@ def main() -> int:
             db.delete_source_label(sid)
         except Exception:
             pass
+        for j in db.list_import_jobs():
+            if j["label"].endswith("-SMOKE"):
+                db.delete_import_job(j["id"])
         app.exit(rc["code"])
 
     def tick():

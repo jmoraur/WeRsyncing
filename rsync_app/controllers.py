@@ -17,9 +17,11 @@ import os.path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from rsync_app import hash_index
 from rsync_app.db import BINDING_COLS, BINDING_DEFAULTS, Database
+from rsync_app.importer import ImportWorker
 from rsync_app.mounts import MountWatcher
-from rsync_app.preflight import check_binding
+from rsync_app.preflight import check_binding, check_import_job
 from rsync_app.probes import RemoteProbeWatcher
 from rsync_app.rsync import OPTIONS, build_rsync_argv
 from rsync_app.runner import SyncRunner
@@ -115,6 +117,87 @@ class ConnectionsController(QObject):
     @Slot(int)
     def deleteBinding(self, binding_id: int) -> None:
         self._db.delete_binding(binding_id)
+
+    # =====================================================================
+    # writes — import_jobs
+    # =====================================================================
+
+    @staticmethod
+    def _import_job_fields(draft: dict) -> dict:
+        return {
+            "label": str(draft.get("label") or "").strip(),
+            "dump_path": str(draft.get("dump_path") or "").strip(),
+            "dest_path": str(draft.get("dest_path") or "").strip(),
+            "archive_root": str(draft.get("archive_root") or "").strip(),
+        }
+
+    @Slot("QVariantMap", result=int)
+    def addImportJob(self, draft: dict) -> int:
+        return self._db.add_import_job(**self._import_job_fields(draft))
+
+    @Slot(int, "QVariantMap")
+    def updateImportJob(self, job_id: int, draft: dict) -> None:
+        self._db.update_import_job(job_id, **self._import_job_fields(draft))
+
+    @Slot(int)
+    def deleteImportJob(self, job_id: int) -> None:
+        self._db.delete_import_job(job_id)
+
+    @Slot(int, result="QVariantMap")
+    def getImportJob(self, job_id: int) -> dict:
+        return next((r for r in self._db.list_import_jobs()
+                     if r["id"] == job_id), {})
+
+    # =====================================================================
+    # import execution — ImportWorker jobs through the same runner
+    # =====================================================================
+
+    @Slot("QVariantMap", result=list)
+    def preflightImportDraft(self, draft: dict) -> list[dict]:
+        job = self._import_job_fields(draft)
+        return check_import_job(
+            job, index_empty=self._import_index_empty(job["archive_root"])
+        )
+
+    @Slot(int, bool)
+    def runImport(self, job_id: int, dry_run: bool) -> None:
+        job = self.getImportJob(job_id)
+        if not job:
+            return
+        mode = "dry_run" if dry_run else "import"
+        suffix = " (dry run)" if dry_run else ""
+        worker = ImportWorker(job, mode)
+        # Negative queue key: repeat runs of the same import job serialize,
+        # real device ids are >= 1 so rsync jobs are never blocked.
+        self._runner.enqueue_worker(
+            f"Import — {job['label']}{suffix}", -job_id, worker
+        )
+
+    @Slot(int)
+    def runArchiveDupReport(self, job_id: int) -> None:
+        job = self.getImportJob(job_id)
+        if not job:
+            return
+        worker = ImportWorker(job, "dup_report")
+        self._runner.enqueue_worker(
+            f"Archive duplicates — {job['label']}", -job_id, worker
+        )
+
+    @staticmethod
+    def _import_index_empty(archive_root: str) -> bool:
+        """True when the archive has no index rows yet (first-run warning).
+        Short-lived main-thread connection; the worker owns its own."""
+        if not archive_root:
+            return False
+        try:
+            conn = hash_index.connect()
+            try:
+                return hash_index.count(
+                    conn, os.path.realpath(archive_root)) == 0
+            finally:
+                conn.close()
+        except Exception:
+            return False
 
     # =====================================================================
     # sync execution — delegates to SyncRunner
@@ -277,6 +360,7 @@ class ConnectionsController(QObject):
                         b, c["id"], d, live, mounts, sources_by_id,
                         depth=2,
                     ))
+        rows.extend(self._import_rows())
         return rows
 
     @Slot(result=list)
@@ -334,6 +418,7 @@ class ConnectionsController(QObject):
                     # the source name.
                     label_override=d["label"],
                 ))
+        rows.extend(self._import_rows())
         return rows
 
     # =====================================================================
@@ -588,6 +673,56 @@ class ConnectionsController(QObject):
             "bindingId": b["id"],
             "containerLabel": container_label,
         }
+
+    def _import_rows(self) -> list[dict]:
+        """The Imports section, appended to both tree views (it has no
+        device/source grouping of its own). Absent while no import job is
+        defined. `sourcePath`/`destDisplay` carry dump → destination for
+        the row's secondary line; `canSync` gates the run button on the
+        error-free-ness of a quick preflight."""
+        jobs = self._db.list_import_jobs()
+        if not jobs:
+            return []
+        rows: list[dict] = [{
+            "rowType": "importHeader",
+            "nodeId": -1,
+            "label": "Imports",
+            "depth": 0,
+            "aggregate": "",
+            "liveness": "",
+            "deviceKind": "",
+            "mountpoint": "",
+            "sourcePath": "",
+            "destDisplay": "",
+            "destSubpath": "",
+            "canSync": False,
+            "containerId": -1,
+            "deviceId": -1,
+            "sourceLabelId": -1,
+            "bindingId": -1,
+        }]
+        for j in jobs:
+            errors = [i for i in check_import_job(j)
+                      if i["severity"] == "error"]
+            rows.append({
+                "rowType": "importJob",
+                "nodeId": j["id"],
+                "label": j["label"],
+                "depth": 1,
+                "aggregate": "",
+                "liveness": "live" if not errors else "not_mounted",
+                "deviceKind": "",
+                "mountpoint": "",
+                "sourcePath": j["dump_path"],
+                "destDisplay": j["dest_path"],
+                "destSubpath": "",
+                "canSync": not errors,
+                "containerId": -1,
+                "deviceId": -1,
+                "sourceLabelId": -1,
+                "bindingId": -1,
+            })
+        return rows
 
     def _source_row(self, s: dict, bindings: list[dict],
                     devices_by_id: dict, mounts: dict,

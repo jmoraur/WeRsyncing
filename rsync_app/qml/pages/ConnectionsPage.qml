@@ -103,7 +103,25 @@ Item {
             connectionForm.initialSourceId = -1
             connectionForm.initialDeviceId = -1
             connectionForm.open()
+        } else if (rowType === "importJob") {
+            const row = connections.getImportJob(nodeId)
+            if (!row.id) return
+            importJobForm.importJobId = nodeId
+            importJobForm.initialLabel = row.label || ""
+            importJobForm.initialDump = row.dump_path || ""
+            importJobForm.initialDest = row.dest_path || ""
+            importJobForm.initialArchive = row.archive_root || ""
+            importJobForm.open()
         }
+    }
+
+    function newImportJob() {
+        importJobForm.importJobId = -1
+        importJobForm.initialLabel = ""
+        importJobForm.initialDump = ""
+        importJobForm.initialDest = ""
+        importJobForm.initialArchive = ""
+        importJobForm.open()
     }
 
     function deleteEntity(rowType, nodeId, label) {
@@ -114,6 +132,10 @@ Item {
     }
 
     function runSync(scopeKind, scopeId) {
+        if (scopeKind === "import") {
+            importConfirmDialog.openFor(scopeId)
+            return
+        }
         syncConfirmDialog.openFor(scopeKind, scopeId)
     }
 
@@ -150,6 +172,13 @@ Item {
                         icon.color: Theme.textColor
                         highlighted: true
                         onClicked: page.newConnection(-1)
+                    }
+
+                    Button {
+                        text: "New import"
+                        icon.name: "document-import"
+                        icon.color: Theme.textColor
+                        onClicked: page.newImportJob()
                     }
 
                     Item { Layout.fillWidth: true }
@@ -276,6 +305,11 @@ Item {
     DeviceForm        { id: deviceForm; objectName: "deviceForm" }
     ConnectionForm    { id: connectionForm; objectName: "connectionForm" }
     SyncConfirmDialog { id: syncConfirmDialog; objectName: "syncConfirmDialog" }
+    ImportJobForm     { id: importJobForm; objectName: "importJobForm" }
+    ImportConfirmDialog {
+        id: importConfirmDialog
+        objectName: "importConfirmDialog"
+    }
 
     DeleteConfirmDialog {
         id: deleteConfirm
@@ -285,6 +319,7 @@ Item {
             else if (rowType === "container") connections.deleteDestContainer(nodeId)
             else if (rowType === "device")    connections.deleteDestDevice(nodeId)
             else if (rowType === "connection") connections.deleteBinding(nodeId)
+            else if (rowType === "importJob") connections.deleteImportJob(nodeId)
         }
     }
 }

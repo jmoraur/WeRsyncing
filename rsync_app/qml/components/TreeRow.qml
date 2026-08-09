@@ -38,13 +38,19 @@ Item {
 
     readonly property bool isHeader: rowType === "container"
                                      || rowType === "source"
+                                     || rowType === "importHeader"
     readonly property bool isDevice: rowType === "device"
     readonly property bool isConnection: rowType === "connection"
+    readonly property bool isImportHeader: rowType === "importHeader"
+    readonly property bool isImportJob: rowType === "importJob"
     readonly property int editTarget: isConnection ? bindingId : nodeId
-    readonly property string syncScope: isConnection ? "connection" : rowType
+    readonly property string syncScope: isConnection ? "connection"
+                                      : isImportJob ? "import"
+                                      : rowType
     readonly property int syncId: isConnection ? bindingId
                                 : isDevice ? deviceId
                                 : rowType === "source" ? sourceLabelId
+                                : isImportJob ? nodeId
                                 : containerId
 
     implicitHeight: isHeader ? Theme.rowHeader
@@ -90,7 +96,7 @@ Item {
                     return row.deviceKind === "local"
                            ? (row.mountpoint || "not mounted")
                            : row.destDisplay
-                if (row.isConnection)
+                if (row.isConnection || row.isImportJob)
                     return row.sourcePath + "  →  " + row.destDisplay
                 if (row.rowType === "source")
                     return row.sourcePath
@@ -148,11 +154,13 @@ Item {
                 onClicked: row.addConnectionRequested(row.deviceId)
             }
             RowActionButton {
+                visible: !row.isImportHeader
                 icon.name: "document-edit"
                 tip: "Edit"
                 onClicked: row.editRequested(row.rowType, row.editTarget)
             }
             RowActionButton {
+                visible: !row.isImportHeader
                 icon.name: "edit-delete"
                 danger: true
                 tip: "Delete"
@@ -163,10 +171,15 @@ Item {
 
         // --- Primary sync action (always visible) ---------------------
         RowActionButton {
-            icon.name: "view-refresh"
+            visible: !row.isImportHeader
+            icon.name: row.isImportJob ? "document-import" : "view-refresh"
             accent: true
             enabled: row.canSync
-            tip: row.isConnection
+            tip: row.isImportJob
+                 ? (row.canSync ? "Import new files from the dump folder"
+                                : "One of this import's folders is missing"
+                                  + " — edit it first")
+                 : row.isConnection
                  ? (row.canSync ? "Sync this connection"
                                 : "Destination unreachable")
                  : (row.canSync ? "Sync everything reachable here"

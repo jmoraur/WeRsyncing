@@ -306,9 +306,11 @@ Item {
                                 }
                             }
 
-                            // Argv row with copy button.
+                            // Argv row with copy button. Import jobs run
+                            // in-process and have no command line to show.
                             RowLayout {
                                 visible: !jobCard.jobCollapsed
+                                         && jobCard.argvText !== ""
                                 Layout.fillWidth: true
                                 spacing: Theme.s1
 

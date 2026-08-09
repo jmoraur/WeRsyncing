@@ -28,6 +28,12 @@ command it is about to execute.
 - **rsync options as data.** Long-form flags (`--archive`, not `-a`) with
   per-connection defaults and per-run overrides. Structured `--chown`/`--chmod`
   support for NAS-style destinations, excludes, custom `--rsh`.
+- **Media imports.** A second job type for photo/video archives: point it at
+  a dump folder (where the phone gets unloaded), an archive, and a
+  destination. New files are moved to the destination; files already in the
+  archive (verified byte-identical, size + blake2b-256, re-checked right
+  before deletion) are deleted from the dump. Includes a dry-run mode and a
+  report-only duplicate finder for the archive itself.
 
 ## Install (Fedora)
 
@@ -59,15 +65,21 @@ the app from the checkout.
 
 - Connection library (SQLite): `~/.local/share/RsyncApp/RsyncApp/rsync.db`
 - Window/UI settings: `~/.config/RsyncApp/RsyncApp.conf`
+- Media-import content index (rebuildable cache):
+  `~/.local/share/RsyncApp/RsyncApp/media_index.db`
 
-Delete either file to reset.
+Delete any of these to reset (the index just gets rebuilt on the next
+import run).
 
 ## Scope and non-goals
 
 Built for a single user on Fedora KDE. Local USB disks and rsync-over-SSH
 remotes only — no SSHFS/NFS/CIFS mount management, no scheduling daemon, no
-sync history database. The app manages and runs commands; your data is only
-ever touched by plain `rsync`.
+sync history database. For sync connections, the app manages and runs
+commands and your data is only ever touched by plain `rsync`. The one
+exception is the media-import feature, which moves and deletes files in your
+dump folder itself — guarded by content verification, a pre-delete re-check,
+and a first-class dry run.
 
 ## License
 

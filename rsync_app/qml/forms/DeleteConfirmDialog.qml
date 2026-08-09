@@ -45,6 +45,9 @@ Dialog {
                 ? "No connections use this source label."
                 : "Will also delete " + binds.length +
                   " connection(s) that use this source."
+        } else if (dlg.rowType === "importJob") {
+            _cascadeText = "Only this import setup is removed — no files"
+                           + " or folders are touched."
         } else {
             _cascadeText = ""   // connection delete has no cascade
         }
@@ -65,6 +68,7 @@ Dialog {
                            : dlg.rowType === "device"     ? "destination device"
                            : dlg.rowType === "source"     ? "source"
                            : dlg.rowType === "connection" ? "connection"
+                           : dlg.rowType === "importJob"  ? "import"
                                                           : "item"
                 return "Delete " + kind + " “" + dlg.label + "”?"
             }

@@ -48,6 +48,8 @@ class _Job:
         "exit_code",
         "process",
         "cancel_requested",
+        "kind",
+        "worker",
     )
 
     def __init__(
@@ -56,6 +58,8 @@ class _Job:
         argv: list[str],
         label: str,
         dest_device_id: int,
+        kind: str = "process",
+        worker=None,
     ) -> None:
         self.id = job_id
         self.argv = list(argv)
@@ -66,6 +70,9 @@ class _Job:
         self.exit_code: Optional[int] = None
         self.process: Optional[QProcess] = None
         self.cancel_requested = False
+        self.kind = kind          # "process" (rsync) | "python" (QThread)
+        self.worker = worker      # QThread with outputReady/exit_code/
+                                  # request_cancel, for kind == "python"
 
     def snapshot(self) -> dict:
         return {
@@ -124,6 +131,20 @@ class SyncRunner(QObject):
             self.jobsChanged.emit()
             self._pump()
 
+    def enqueue_worker(self, label: str, queue_key: int, worker) -> int:
+        """Queue an in-process worker (a QThread) as a job. `queue_key`
+        plays the destDeviceId role: same key = sequential. Import jobs use
+        negative keys so they can never collide with real device ids."""
+        job = _Job(self._next_id, [], label, queue_key,
+                   kind="python", worker=worker)
+        self._next_id += 1
+        self._all[job.id] = job
+        self._order.append(job.id)
+        self._queues.setdefault(queue_key, []).append(job.id)
+        self.jobsChanged.emit()
+        self._pump()
+        return job.id
+
     @Slot(int)
     def cancel(self, job_id: int) -> None:
         job = self._all.get(job_id)
@@ -138,7 +159,11 @@ class SyncRunner(QObject):
             job.state = "cancelled"
             self.jobStateChanged.emit(job.id, job.state)
             self.jobsChanged.emit()
-        else:  # running
+        elif job.kind == "python":  # running worker: cooperative cancel
+            job.cancel_requested = True
+            if job.worker is not None:
+                job.worker.request_cancel()
+        else:  # running process
             job.cancel_requested = True
             self._terminate(job)
 
@@ -178,17 +203,25 @@ class SyncRunner(QObject):
         """Terminate all in-flight jobs synchronously. Wired to aboutToQuit."""
         for job_id in list(self._active.values()):
             job = self._all.get(job_id)
-            if job is None or job.process is None:
+            if job is None:
                 continue
             job.cancel_requested = True
-            job.process.terminate()
+            if job.process is not None:
+                job.process.terminate()
+            elif job.worker is not None:
+                job.worker.request_cancel()
         for job_id in list(self._active.values()):
             job = self._all.get(job_id)
-            if job is None or job.process is None:
+            if job is None:
                 continue
-            if not job.process.waitForFinished(_TERMINATE_GRACE_MS):
-                job.process.kill()
-                job.process.waitForFinished(500)
+            if job.process is not None:
+                if not job.process.waitForFinished(_TERMINATE_GRACE_MS):
+                    job.process.kill()
+                    job.process.waitForFinished(500)
+            elif job.worker is not None:
+                # Cooperative cancel is checked per file / per hash chunk,
+                # so the wait is short in practice.
+                job.worker.wait(_TERMINATE_GRACE_MS)
 
     # -- internals -----------------------------------------------------
 
@@ -203,7 +236,8 @@ class SyncRunner(QObject):
                 job = self._all[job_id]
                 err = (
                     self._pre_start_check(job.dest_device_id, job.argv)
-                    if self._pre_start_check is not None else None
+                    if self._pre_start_check is not None
+                    and job.kind == "process" else None
                 )
                 if err is not None:
                     self._fail_pre_start(job, err)
@@ -223,6 +257,9 @@ class SyncRunner(QObject):
         self.jobsChanged.emit()
 
     def _start(self, job: _Job) -> None:
+        if job.kind == "python":
+            self._start_worker(job)
+            return
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.setProgram(job.argv[0])
@@ -241,6 +278,63 @@ class SyncRunner(QObject):
         self.jobStateChanged.emit(job.id, job.state)
         self.jobsChanged.emit()
         proc.start()
+
+    def _start_worker(self, job: _Job) -> None:
+        worker = job.worker
+        worker.setParent(self)
+        # outputReady carries one log line per emit (str crosses the thread
+        # boundary cleanly; dicts don't — see tasks/lessons.md).
+        worker.outputReady.connect(
+            lambda text, jid=job.id: self._on_worker_output(jid, text)
+        )
+        worker.finished.connect(
+            lambda jid=job.id: self._on_worker_finished(jid)
+        )
+        job.state = "running"
+        self.jobStateChanged.emit(job.id, job.state)
+        self.jobsChanged.emit()
+        worker.start()
+
+    def _on_worker_output(self, job_id: int, text: str) -> None:
+        job = self._all.get(job_id)
+        if job is None:
+            return
+        line = text + "\n"
+        job.log += line
+        self.jobOutputAppended.emit(job.id, line)
+
+    def _on_worker_finished(self, job_id: int) -> None:
+        job = self._all.get(job_id)
+        if job is None:
+            return
+        worker = job.worker
+        job.exit_code = worker.exit_code if worker is not None else -1
+        if job.cancel_requested or (
+                worker is not None and worker.cancel_requested):
+            job.state = "cancelled"
+        elif job.exit_code == 0:
+            job.state = "done"
+        elif job.exit_code == 3:
+            # Finished, but some files were skipped for safety and left in
+            # the dump — the log's skip lines say which and why.
+            note = (
+                "\n[runner] finished with skipped files — they were left"
+                " where they were; see the lines above.\n"
+            )
+            job.log += note
+            self.jobOutputAppended.emit(job.id, note)
+            job.state = "done"
+        else:
+            job.state = "failed"
+        job.worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._active.get(job.dest_device_id) == job.id:
+            del self._active[job.dest_device_id]
+        self.jobStateChanged.emit(job.id, job.state)
+        self.jobsChanged.emit()
+        self.runningChanged.emit()
+        self._pump()
 
     def _on_output(self, job_id: int) -> None:
         job = self._all.get(job_id)
