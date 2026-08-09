@@ -161,6 +161,127 @@ def run_dup_report(cfg: dict, conn, progress=print, cancelled=_never) -> int:
     return EXIT_OK
 
 
+# --- archive dedupe ---------------------------------------------------------
+
+# Keep-rules for "Remove duplicates in archive": lower key wins. Named event
+# folders beat dump/no-topic folders, shallow paths beat nested ones, clean
+# filenames beat " (2)"/"Copy" names.
+_MISC_EVENT = re.compile(r"^(?:\d{4}\.)?00 - ")
+_COPYISH = re.compile(r" \(\d+\)| - Copy|_copy")
+
+
+def _keep_key(relpath: str) -> tuple:
+    parts = relpath.split(os.sep)
+    name = parts[-1]
+    penalty = 0
+    if len(parts) >= 2 and _MISC_EVENT.match(parts[1]):
+        penalty += 100
+    penalty += 10 * max(0, len(parts) - 3)   # deeper than year/event/file
+    return (penalty, os.path.dirname(relpath),
+            _COPYISH.search(name) is not None, len(name), name)
+
+
+def run_dedupe(cfg: dict, conn, progress=print, cancelled=_never) -> int:
+    archive = os.path.realpath(cfg["archive_root"])
+    if not os.path.isdir(archive):
+        progress(f"error: The archive folder can't be found: {archive}")
+        return EXIT_PREFLIGHT
+    progress(f"Scanning archive: {archive}")
+    n = hash_index.refresh(conn, archive, progress, cancelled)
+    progress(f"Archive index ready: {n:,} files.")
+    groups = hash_index.dup_groups(conn, archive, progress, cancelled)
+    if cancelled():
+        # Deletes only ever run off a complete scan — a partial scan could
+        # form incomplete groups and pick the wrong keeper.
+        progress("Cancelled — no files were deleted.")
+        return EXIT_OK
+    deleted = freed = repaired = skipped = 0
+    for group in sorted(groups, key=lambda g: -g[0]["size"]):
+        if cancelled():
+            progress("Cancelled — remaining duplicate groups were left"
+                     " alone.")
+            break
+        d, f, r, s = _dedupe_group(conn, archive, group, progress)
+        deleted += d
+        freed += f
+        repaired += r
+        skipped += s
+    progress("")
+    if not groups:
+        progress("=== No duplicates found in the archive ===")
+        return EXIT_OK
+    progress("=== Archive clean-up finished ===")
+    progress("duplicate groups:".ljust(24) + f"{len(groups)}")
+    progress("extra copies deleted:".ljust(24) + f"{deleted}"
+             f" ({_fmt_bytes(freed)} freed)")
+    progress("keeper times repaired:".ljust(24) + f"{repaired}")
+    if skipped:
+        progress("groups left alone:".ljust(24) + f"{skipped}"
+                 " (changed during the run — check the log and re-run)")
+    return EXIT_SKIPPED_UNSAFE if skipped else EXIT_OK
+
+
+def _dedupe_group(conn, archive: str, group: list[dict],
+                  progress) -> tuple[int, int, int, int]:
+    """Delete every member of one content-identical group except the keeper.
+    Returns (deleted, bytes_freed, mtimes_repaired, groups_skipped)."""
+    for row in group:
+        try:
+            st = os.stat(os.path.join(archive, row["relpath"]))
+        except OSError:
+            st = None
+        if st is None or (st.st_size, st.st_mtime_ns) != (row["size"],
+                                                          row["mtime_ns"]):
+            progress(f"skip  {row['relpath']} — changed on disk since the"
+                     " scan, group left alone")
+            return (0, 0, 0, 1)
+    group = sorted(group, key=lambda r: _keep_key(r["relpath"]))
+    keeper, victims = group[0], group[1:]
+    keeper_path = os.path.join(archive, keeper["relpath"])
+    digest = keeper["hash"]
+    try:
+        live = hash_index.hash_file(keeper_path)
+    except OSError:
+        live = None
+    if live != digest:                     # live re-hash, never the index
+        progress(f"skip  {keeper['relpath']} — the copy to keep no longer"
+                 " matches, group left alone")
+        return (0, 0, 0, 1)
+    progress(f"keep  {keeper['relpath']}")
+    deleted = freed = skipped = 0
+    for row in victims:
+        full = os.path.join(archive, row["relpath"])
+        try:
+            st = os.stat(full)
+            if (st.st_size, st.st_mtime_ns) != (row["size"],
+                                                row["mtime_ns"]):
+                raise OSError("changed on disk")
+            os.remove(full)
+        except OSError as e:
+            progress(f"skip  {row['relpath']} — {e}, left alone")
+            skipped = 1
+            continue
+        hash_index.remove_file(conn, archive, row["relpath"])
+        progress(f"del   {row['relpath']} == kept {keeper['relpath']}")
+        deleted += 1
+        freed += row["size"]
+    repaired = 0
+    earliest = min(r["mtime_ns"] for r in group)
+    if keeper["mtime_ns"] > earliest:
+        # A re-copy clobbered the keeper's mtime; the earliest copy has the
+        # original time.
+        try:
+            os.utime(keeper_path, ns=(earliest, earliest))
+            hash_index.upsert_file(conn, archive, keeper["relpath"],
+                                   keeper["size"], earliest, digest)
+            progress(f"mtime {keeper['relpath']} — repaired to the earliest"
+                     " copy's time")
+            repaired = 1
+        except OSError as e:
+            progress(f"note  {keeper['relpath']} — mtime repair failed ({e})")
+    return (deleted, freed, repaired, skipped)
+
+
 # --- planning ---------------------------------------------------------------
 
 def _plan(dump, dest, archive, conn, progress, cancelled,
@@ -547,9 +668,9 @@ def _is_within(inner: str, outer: str) -> bool:
 # --- Qt worker --------------------------------------------------------------
 
 class ImportWorker(QThread):
-    """Runs one import (or dup report) off the GUI thread. The runner treats
-    it like a process: outputReady streams log lines, exit_code lands before
-    finished() fires."""
+    """Runs one import (or dup report / archive clean-up) off the GUI thread.
+    The runner treats it like a process: outputReady streams log lines,
+    exit_code lands before finished() fires."""
 
     outputReady = Signal(str)
 
@@ -557,6 +678,7 @@ class ImportWorker(QThread):
         super().__init__(parent)
         self._cfg = dict(cfg)
         self._mode = mode            # "import" | "dry_run" | "dup_report"
+                                     # | "dedupe"
         self._cancel = threading.Event()
         self.exit_code = -1
 
@@ -575,6 +697,9 @@ class ImportWorker(QThread):
             cancelled = self._cancel.is_set
             if self._mode == "dup_report":
                 self.exit_code = run_dup_report(
+                    self._cfg, conn, emit, cancelled)
+            elif self._mode == "dedupe":
+                self.exit_code = run_dedupe(
                     self._cfg, conn, emit, cancelled)
             else:
                 self.exit_code = run_import(

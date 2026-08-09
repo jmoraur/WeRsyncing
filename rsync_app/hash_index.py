@@ -194,6 +194,14 @@ def upsert_file(conn: sqlite3.Connection, root: str, relpath: str,
     conn.commit()
 
 
+def remove_file(conn: sqlite3.Connection, root: str, relpath: str) -> None:
+    conn.execute(
+        "DELETE FROM archive_files WHERE root = ? AND relpath = ?",
+        (root, relpath),
+    )
+    conn.commit()
+
+
 def dup_groups(conn: sqlite3.Connection, root: str,
                progress=None, cancelled=_never) -> list[list[dict]]:
     """Groups (≥2 members) of content-identical files under root. Only files

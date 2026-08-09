@@ -9,7 +9,9 @@ import "../components"
 // mode nothing in the source is ever touched. Warnings must each be
 // acknowledged before a real run; a dry run changes nothing and needs no
 // acknowledgements (it's the recommended first step). "Find duplicates in
-// archive" starts the report-only scan of the archive itself.
+// archive" starts the report-only scan of the archive itself; "Remove
+// duplicates in archive" keeps one copy per identical set and deletes the
+// extras (the report is the preview).
 Dialog {
     id: dlg
     modal: true
@@ -97,6 +99,16 @@ Dialog {
                     + " they are."
         }
 
+        Label {
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: "\"Remove duplicates in archive\" keeps one copy of each"
+                  + " set of identical files in the archive (preferring named"
+                  + " event folders and clean names) and deletes the extra"
+                  + " copies — there is no trash bin. Run \"Find duplicates"
+                  + " in archive\" first to preview."
+        }
+
         IssueList {
             Layout.fillWidth: true
             visible: dlg.issues.length > 0
@@ -121,6 +133,14 @@ Dialog {
                 enabled: !dlg.hasErrors
                 onClicked: {
                     connections.runArchiveDupReport(dlg.jobId)
+                    dlg.accept()
+                }
+            }
+            Button {
+                text: "Remove duplicates in archive"
+                enabled: !dlg.hasErrors
+                onClicked: {
+                    connections.runArchiveDedupe(dlg.jobId)
                     dlg.accept()
                 }
             }

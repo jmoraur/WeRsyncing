@@ -186,6 +186,16 @@ class ConnectionsController(QObject):
             f"Archive duplicates — {job['label']}", -job_id, worker
         )
 
+    @Slot(int)
+    def runArchiveDedupe(self, job_id: int) -> None:
+        job = self.getImportJob(job_id)
+        if not job:
+            return
+        worker = ImportWorker(job, "dedupe")
+        self._runner.enqueue_worker(
+            f"Archive clean-up — {job['label']}", -job_id, worker
+        )
+
     @staticmethod
     def _import_index_empty(archive_root: str) -> bool:
         """True when the archive has no index rows yet (first-run warning).

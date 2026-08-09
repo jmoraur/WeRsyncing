@@ -113,6 +113,20 @@ def main():
     s2 = wait_terminal(app, runner, id2)
     ok(s1 == "done" and s2 == "done", "both sequential jobs finish")
 
+    print("== archive clean-up job through the runner ==")
+    write(os.path.join(archive, "2020", "01 - Old", "keep_copy.jpg"),
+          b"KEEP")
+    worker = ImportWorker(cfg, "dedupe")
+    job_id = runner.enqueue_worker("Archive clean-up — test", -1, worker)
+    state = wait_terminal(app, runner, job_id)
+    ok(state == "done", f"clean-up job reached done (got {state})")
+    ok(os.path.exists(os.path.join(archive, "2020", "01 - Old", "keep.jpg"))
+       and not os.path.exists(os.path.join(archive, "2020", "01 - Old",
+                                           "keep_copy.jpg")),
+       "clean-named copy kept, copy-suffixed one deleted")
+    log = runner.jobLog(job_id)
+    ok("del   " in log and "freed" in log, "clean-up log streamed")
+
     runner.shutdown()
     import shutil
     shutil.rmtree(tmp)

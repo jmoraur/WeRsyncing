@@ -7,7 +7,10 @@ non-media skips, empty-folder pruning, dry-run inertness, idempotent
 re-runs, the tampered-index delete guard, and preflight overlap aborts.
 Copy mode gets its own sections: source never modified, duplicates
 skipped, no pruning, read-only sources, and per-file read errors costing
-one file (exit 3) instead of the run.
+one file (exit 3) instead of the run. Archive clean-up sections cover the
+keep-rules (named event beats misc, shallow beats deep, clean name beats
+copy suffix), keeper mtime repair, index bookkeeping, the changed-group
+guard, and cancel inertness.
 
 Run: python3 scripts/smoke_import.py
 """
@@ -294,6 +297,86 @@ def main():
     ok("2 identical files" in text and "a_copy.jpg" in text
        and "a.jpg" in text, "duplicate group reported")
     ok(snapshot(archive) == before_arch, "report changed nothing")
+
+    print("== remove archive duplicates ==")
+    # Widen the a_bytes group across all keep-rules: misc folder loses,
+    # deep nesting loses, copy-suffixed name loses; keeper's mtime was
+    # clobbered and gets repaired to the earliest copy's.
+    keeper = os.path.join(archive, "2015", "03 - Old Event", "a.jpg")
+    a3 = os.path.join(archive, "2016", "00 - Misc", "a3.jpg")
+    a4 = os.path.join(archive, "2024", "2024.06 - Trip", "deep", "a4.jpg")
+    write(a3, a_bytes)
+    write(a4, a_bytes)
+    early = 1_500_000_000_000_000_000
+    os.utime(a3, ns=(early, early))
+    os.utime(keeper, ns=(early + 10**15, early + 10**15))
+    lines = []
+    code = importer.run_dedupe(cfg, conn, progress=lines.append)
+    text = "\n".join(lines)
+    ok(code == importer.EXIT_OK, "dedupe exit 0")
+    ok(os.path.exists(keeper), "named-event shallow clean-named copy kept")
+    ok(not os.path.exists(a3) and not os.path.exists(a4)
+       and not os.path.exists(os.path.join(archive, "2024", "2024.06 - Trip",
+                                           "a_copy.jpg")),
+       "misc, deep and copy-named copies deleted")
+    ok(os.stat(keeper).st_mtime_ns == early,
+       "keeper mtime repaired to earliest")
+    ok("keep  " + os.path.join("2015", "03 - Old Event", "a.jpg") in text
+       and "del   " in text and "freed" in text,
+       "log shows keeper, deletions and freed bytes")
+    ok("extra copies deleted:   3" in text, "summary counts 3 deletions")
+    ok(conn.execute(
+        "SELECT COUNT(*) FROM archive_files WHERE relpath LIKE '%a_copy%'"
+        " OR relpath LIKE '%a3.jpg' OR relpath LIKE '%a4.jpg'"
+    ).fetchone()[0] == 0, "deleted files' index rows removed")
+    row = hash_index.get_row(conn, os.path.realpath(archive),
+                             os.path.join("2015", "03 - Old Event", "a.jpg"))
+    ok(row is not None and row["mtime_ns"] == early
+       and row["hash"] is not None,
+       "keeper index row tracks repaired mtime, digest kept")
+
+    print("== dedupe re-run is a no-op ==")
+    before_arch = snapshot(archive)
+    lines = []
+    code = importer.run_dedupe(cfg, conn, progress=lines.append)
+    ok(code == importer.EXIT_OK, "dedupe re-run exit 0")
+    ok("No duplicates found" in "\n".join(lines),
+       "re-run finds no duplicates")
+    ok(snapshot(archive) == before_arch, "re-run changed nothing")
+
+    print("== dedupe skips a group that changed on disk ==")
+    real_arch = os.path.realpath(archive)
+    p1 = os.path.join(archive, "2025", "2025.01 - Pair", "p1.jpg")
+    p2 = os.path.join(archive, "2025", "2025.01 - Pair", "p2.jpg")
+    write(p1, b"PAIR-CONTENT")
+    write(p2, b"PAIR-CONTENT")
+    hash_index.refresh(conn, real_arch)
+    groups = hash_index.dup_groups(conn, real_arch)
+    group = [g for g in groups if any("p1.jpg" in r["relpath"] for r in g)]
+    ok(len(group) == 1, "pair group found for the guard test")
+    os.utime(p2)   # stat no longer matches the index row
+    lines = []
+    d, f, r, s = importer._dedupe_group(conn, real_arch, group[0],
+                                        lines.append)
+    ok(s == 1 and d == 0 and os.path.exists(p1) and os.path.exists(p2),
+       "changed group left alone")
+    ok("left alone" in "\n".join(lines), "skip reason surfaced")
+    lines = []
+    code = importer.run_dedupe(cfg, conn, progress=lines.append)
+    ok(code == importer.EXIT_OK and os.path.exists(p1)
+       and not os.path.exists(p2),
+       "fresh scan heals the changed row and dedupes the pair")
+
+    print("== dedupe cancel deletes nothing ==")
+    write(p2, b"PAIR-CONTENT")
+    lines = []
+    code = importer.run_dedupe(cfg, conn, progress=lines.append,
+                               cancelled=lambda: True)
+    ok(code == importer.EXIT_OK, "cancelled dedupe exit 0")
+    ok(os.path.exists(p1) and os.path.exists(p2),
+       "cancel before the scan finished deleted nothing")
+    ok("no files were deleted" in "\n".join(lines),
+       "cancel reason surfaced")
 
     conn.close()
     import shutil
