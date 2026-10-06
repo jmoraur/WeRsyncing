@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.8.1
+Version:        0.9.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,12 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.9.0-1
+- Groups, devices, sources and the Imports section fold open/closed
+  (arrow or click on the name); the folded state is remembered
+- Destination groups can be moved up/down (hover buttons); the order
+  is saved
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.8.1-1
 - Connection list no longer shows a doubled slash when a subpath was
   saved with leading/trailing slashes (the rsync command was already

@@ -70,8 +70,9 @@ CREATE TABLE IF NOT EXISTS source_labels (
 );
 
 CREATE TABLE IF NOT EXISTS dest_containers (
-    id    INTEGER PRIMARY KEY,
-    label TEXT NOT NULL
+    id       INTEGER PRIMARY KEY,
+    label    TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS dest_devices (
@@ -131,6 +132,7 @@ class Database(QObject):
         self._migrate_source_unique()
         self._migrate_options_ux()
         self._migrate_import_copy_mode()
+        self._migrate_container_position()
         self._conn.commit()
 
     def _migrate_baseline_opts(self) -> None:
@@ -171,6 +173,17 @@ class Database(QObject):
             self._conn.execute(
                 "ALTER TABLE import_jobs ADD COLUMN copy_mode "
                 "INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))"
+            )
+
+    def _migrate_container_position(self) -> None:
+        """Add dest_containers.position (user-set group order). All 0 at
+        first, so the list keeps its old by-label order until a move."""
+        have = {row["name"] for row in
+                self._conn.execute("PRAGMA table_info(dest_containers)")}
+        if "position" not in have:
+            self._conn.execute(
+                "ALTER TABLE dest_containers ADD COLUMN position "
+                "INTEGER NOT NULL DEFAULT 0"
             )
 
     def _migrate_source_unique(self) -> None:
@@ -338,9 +351,27 @@ class Database(QObject):
     def list_dest_containers(self) -> list[dict]:
         return [
             dict(r) for r in self._conn.execute(
-                "SELECT * FROM dest_containers ORDER BY label"
+                "SELECT * FROM dest_containers ORDER BY position, label"
             )
         ]
+
+    def move_dest_container(self, container_id: int, delta: int) -> None:
+        """Swap a container with its neighbour (delta -1 = up, +1 = down).
+        Renumbers every container 0..n-1 so positions stay distinct."""
+        ids = [c["id"] for c in self.list_dest_containers()]
+        if container_id not in ids:
+            return
+        i = ids.index(container_id)
+        j = i + delta
+        if not 0 <= j < len(ids):
+            return
+        ids[i], ids[j] = ids[j], ids[i]
+        self._conn.executemany(
+            "UPDATE dest_containers SET position = ? WHERE id = ?",
+            [(pos, cid) for pos, cid in enumerate(ids)],
+        )
+        self._conn.commit()
+        self.db_changed.emit()
 
     # --- dest_devices -------------------------------------------------------
 

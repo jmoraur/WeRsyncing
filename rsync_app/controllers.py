@@ -67,6 +67,10 @@ class ConnectionsController(QObject):
     def updateDestContainer(self, container_id: int, label: str) -> None:
         self._db.update_dest_container(container_id, label=label)
 
+    @Slot(int, int)
+    def moveDestContainer(self, container_id: int, delta: int) -> None:
+        self._db.move_dest_container(container_id, delta)
+
     @Slot(int)
     def deleteDestContainer(self, container_id: int) -> None:
         self._db.delete_dest_container(container_id)

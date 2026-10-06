@@ -25,6 +25,7 @@ Item {
         id: uiSettings
         category: "ui"
         property string viewMode: "destination"
+        property string collapsedKeys: ""
         property alias outputCollapsed: outputPanel.collapsed
         property alias outputHeight: page._outputHeight
         property alias outputFilter: outputPanel._filter
@@ -32,6 +33,7 @@ Item {
 
     Component.onCompleted: {
         connectionsModel.viewMode = uiSettings.viewMode
+        connectionsModel.collapsedKeys = uiSettings.collapsedKeys
         heightReadyTimer.start()
     }
 
@@ -45,6 +47,9 @@ Item {
         target: connectionsModel
         function onViewModeChanged() {
             uiSettings.viewMode = connectionsModel.viewMode
+        }
+        function onCollapsedKeysChanged() {
+            uiSettings.collapsedKeys = connectionsModel.collapsedKeys
         }
     }
 
@@ -251,6 +256,11 @@ Item {
                                 page.newConnection(deviceId)
                             onAddDeviceRequested: containerId =>
                                 page.newDevice(containerId)
+                            onToggleRequested: key =>
+                                connectionsModel.toggleCollapsed(key)
+                            onMoveRequested: (containerId, delta) =>
+                                connections.moveDestContainer(containerId,
+                                                              delta)
                         }
                     }
                 }

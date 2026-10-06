@@ -143,6 +143,13 @@ def main() -> int:
 
     # 1. Page
     add("01_page", lambda: None)
+    # Fold the local device and the Imports section; second container
+    # gives the move-up/down buttons something to do.
+    cid2 = db.add_dest_container(label="Another-group-SMOKE")
+    add("01b_page_collapsed",
+        lambda: model.setProperty("collapsedKeys", f"d{did}|imports"))
+    add("__close", lambda: (model.setProperty("collapsedKeys", ""),
+                            db.delete_dest_container(cid2)))
 
     # 2. ConnectionForm (new) — exercises every field + preview binding.
     cf_state = {"dlg": None}

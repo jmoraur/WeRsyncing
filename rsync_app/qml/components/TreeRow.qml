@@ -29,12 +29,19 @@ Item {
     required property int deviceId
     required property int sourceLabelId
     required property int bindingId
+    required property string groupKey
+    required property bool hasChildren
+    required property bool collapsed
+    required property bool canMoveUp
+    required property bool canMoveDown
 
     signal syncRequested(string scopeKind, int scopeId)
     signal editRequested(string rowType, int nodeId)
     signal deleteRequested(string rowType, int nodeId, string label)
     signal addConnectionRequested(int deviceId)
     signal addDeviceRequested(int containerId)
+    signal toggleRequested(string groupKey)
+    signal moveRequested(int containerId, int delta)
 
     readonly property bool isHeader: rowType === "container"
                                      || rowType === "source"
@@ -74,6 +81,22 @@ Item {
         anchors.rightMargin: Theme.s2
         spacing: Theme.s2
 
+        // Fold arrow on rows that hold others (groups, devices). Every row
+        // keeps the slot so labels line up at each depth. Text glyph, not a
+        // theme icon: it renders everywhere (offscreen smoke runs too).
+        Label {
+            text: !row.hasChildren ? "" : row.collapsed ? "\u25B8" : "\u25BE"
+            horizontalAlignment: Text.AlignHCenter
+            Layout.preferredWidth: 16
+            font.pixelSize: 16
+            opacity: arrowHover.hovered ? 1.0 : 0.6
+            HoverHandler { id: arrowHover; cursorShape: Qt.PointingHandCursor }
+            TapHandler {
+                enabled: row.hasChildren
+                onTapped: row.toggleRequested(row.groupKey)
+            }
+        }
+
         LivenessDot {
             visible: row.liveness !== ""
             liveness: row.liveness
@@ -87,6 +110,11 @@ Item {
             elide: Text.ElideRight
             Layout.preferredWidth: row.isHeader ? implicitWidth
                                                 : Math.min(implicitWidth, 230)
+            // Clicking a group's name folds it too.
+            TapHandler {
+                enabled: row.hasChildren
+                onTapped: row.toggleRequested(row.groupKey)
+            }
         }
 
         // Secondary text: paths in monospace, dimmed.
@@ -113,7 +141,7 @@ Item {
         // Container rows have no secondary text — flexible spacer so the
         // pill + actions hug the right.
         Item {
-            visible: row.rowType === "container"
+            visible: row.rowType === "container" || row.isImportHeader
             Layout.fillWidth: true
         }
 
@@ -141,6 +169,20 @@ Item {
             visible: opacity > 0
             Behavior on opacity { NumberAnimation { duration: 120 } }
 
+            RowActionButton {
+                visible: row.rowType === "container"
+                enabled: row.canMoveUp
+                icon.name: "go-up"
+                tip: "Move group up"
+                onClicked: row.moveRequested(row.containerId, -1)
+            }
+            RowActionButton {
+                visible: row.rowType === "container"
+                enabled: row.canMoveDown
+                icon.name: "go-down"
+                tip: "Move group down"
+                onClicked: row.moveRequested(row.containerId, 1)
+            }
             RowActionButton {
                 visible: row.rowType === "container"
                 icon.name: "list-add"
