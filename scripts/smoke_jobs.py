@@ -110,6 +110,15 @@ check("titles are from-device > name",
       titles == {11: "Laptop > Documents", 12: "NAS > Appdata Backups"})
 check("single-job scope builds the same command as the group scope",
       ctl.jobsForScope("job", 12, 0)[0]["command"] == cmd[12])
+nas, lap = devices["NAS"]["id"], devices["Laptop"]["id"]
+check("source → destination scope picks only that pair",
+      [r["id"] for r in ctl.jobsForScope("sourceDevice", nas, lap)] == [12]
+      and [r["id"] for r in ctl.jobsForScope("sourceDevice", lap, nas)] == [11])
+src_rows = [(r["rowType"], r["depth"], r["label"]) for r in ctl.bySource()
+            if r["rowType"] in ("source", "device", "job")]
+check("Sources view: source → destination → jobs",
+      ("source", 0, "NAS") in src_rows and ("device", 1, "Laptop") in src_rows
+      and ("job", 2, "Appdata Backups") in src_rows)
 draft = dict(ctl.getJob(12))
 check("a job's saved row previews the same command",
       ctl.previewCommand(draft) == cmd[12])

@@ -379,7 +379,8 @@ class ConnectionsController(QObject):
         """Jobs a sync button covers, resolved for the confirm popups.
 
         kind: "job" (id) · "group" (group id) · "groupDevice" (group id,
-        destination device id) · "source" (from-device id).
+        destination device id) · "source" (from-device id) · "sourceDevice"
+        (from-device id, destination device id).
         """
         def picked(j):
             if kind == "job":
@@ -391,6 +392,9 @@ class ConnectionsController(QObject):
                         and j["to_device_id"] == scope_id2)
             if kind == "source":
                 return j["from_device_id"] == scope_id
+            if kind == "sourceDevice":
+                return (j["from_device_id"] == scope_id
+                        and j["to_device_id"] == scope_id2)
             raise ValueError(f"unknown scope kind {kind!r}")
 
         ctx = self._ctx()
@@ -455,7 +459,8 @@ class ConnectionsController(QObject):
 
     @Slot(result=list)
     def bySource(self) -> list[dict]:
-        """Sources view: the device a job copies FROM → its jobs."""
+        """Sources view: the device a job copies FROM → destination
+        device → jobs."""
         ctx = self._ctx()
         jobs = self._db.list_jobs()
         rows: list[dict] = []
@@ -472,10 +477,22 @@ class ConnectionsController(QObject):
                 **{k: v for k, v in self._device_cols(d, ctx).items()
                    if k in ("liveness", "where")},
             })
-            for v in sorted(views, key=lambda v: v["title"].lower()):
-                to = ctx["devices"][v["job"]["to_device_id"]]
-                label = f"{v['name']}  →  {to['label']}"
-                rows.append(self._job_row(v, label, 1, [skey]))
+            for t in self._ordered_devices(
+                    {v["job"]["to_device_id"] for v in views}, ctx):
+                tviews = [v for v in views if v["job"]["to_device_id"] == t["id"]]
+                tkey = f"s{d['id']}d{t['id']}"
+                rows.append({
+                    **self._device_cols(t, ctx),
+                    "rowType": "device", "depth": 1,
+                    "groupKey": tkey, "_parents": [skey],
+                    "aggregate": "",
+                    "canSync": any(v["ready"] for v in tviews),
+                    "scopeKind": "sourceDevice", "scopeId": d["id"],
+                    "scopeId2": t["id"],
+                    "groupId": -1,
+                })
+                for v in sorted(tviews, key=lambda v: v["name"].lower()):
+                    rows.append(self._job_row(v, v["name"], 2, [skey, tkey]))
         rows += self._import_rows() + self._device_list_rows(ctx)
         return rows
 

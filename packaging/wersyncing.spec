@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.10.1
+Version:        0.10.2
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,10 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.2-1
+- Sources view: source -> destination device -> jobs, like the Groups
+  view; the destination row has its own sync button
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.1-1
 - The job popup lists the warnings still to confirm, not just how many
 

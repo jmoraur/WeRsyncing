@@ -189,7 +189,8 @@ Item {
                 onClicked: row.moveRequested(row.groupId, 1)
             }
             RowActionButton {
-                visible: row.rowType === "group" || row.rowType === "device"
+                visible: row.rowType === "group"
+                         || (row.rowType === "device" && row.groupId >= 0)
                 icon.name: "list-add"
                 tip: "New job here"
                 onClicked: row.newJobRequested(
