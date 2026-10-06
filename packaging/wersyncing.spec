@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.10.2
+Version:        0.10.3
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,9 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.3-1
+- View switch reads "Group by: Destinations | Sources"
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.2-1
 - Sources view: source -> destination device -> jobs, like the Groups
   view; the destination row has its own sync button

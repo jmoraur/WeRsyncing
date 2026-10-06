@@ -162,12 +162,12 @@ Item {
             Item { Layout.fillWidth: true }
 
             Label {
-                text: "View"
+                text: "Group by"
                 opacity: 0.6
             }
             SegmentedControl {
                 model: [
-                    {value: "group", label: "Groups"},
+                    {value: "group", label: "Destinations"},
                     {value: "source", label: "Sources"},
                 ]
                 value: connectionsModel.viewMode
