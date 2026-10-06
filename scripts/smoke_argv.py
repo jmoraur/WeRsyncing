@@ -98,4 +98,17 @@ a = argv({"path_mode": "folder"}, dest=DEST_REMOTE)
 check("folder mode, remote dest path composed without trailing slash",
       a[-1] == "root@10.0.0.5:/mnt/user/media")
 
+# --- direction: pull swaps the two paths, nothing else ----------------------
+push = argv(dest=DEST_REMOTE)
+pull = argv({"direction": "pull"}, dest=DEST_REMOTE)
+check("pull puts the device path first, laptop path last",
+      pull[-2:] == ["root@10.0.0.5:/mnt/user/media/", "/home/user/Pictures/"])
+check("pull keeps every flag (incl. --rsh) identical to push",
+      pull[:-2] == argv(dest=DEST_REMOTE)[:-2])
+check("missing direction key means push",
+      push[-1] == "root@10.0.0.5:/mnt/user/media/")
+a = argv({"direction": "pull", "path_mode": "folder"}, dest=DEST_LOCAL)
+check("pull from a local drive, folder mode",
+      a[-2:] == ["/mnt/backup/photos", "/home/user/Pictures"])
+
 print("smoke_argv: all checks passed")

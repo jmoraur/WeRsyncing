@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.7.0
+Version:        0.8.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,11 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.8.0-1
+- Connections can now run in either direction: "device -> laptop" (pull)
+  copies from a drive or server into a laptop folder with the same
+  options, command preview and pre-flight checks as a normal sync
+
 * Sun Aug 09 2026 Jan Moraru <jan@moraru.ch> - 0.7.0-1
 - New "Remove duplicates in archive" action: keeps one copy of each
   set of identical archive files (preferring named event folders,

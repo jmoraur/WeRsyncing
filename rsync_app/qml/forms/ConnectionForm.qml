@@ -119,6 +119,7 @@ Dialog {
             source_label_id: 0, dest_device_id: 0, dest_subpath: "",
             path_mode: "contents", chown_mode: "source",
             chown_value: "", chmod_value: "", excludes: "",
+            direction: "push",
         }
         for (const o of _catalog) d[o.key] = o.default ? 1 : 0
         return d
@@ -194,6 +195,21 @@ Dialog {
                 width: parent.width
                 spacing: Theme.s3
 
+                // ---- Direction: push = laptop → device, pull = device → laptop
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.s2
+                    Label { text: "Direction"; opacity: 0.75 }
+                    SegmentedControl {
+                        model: [
+                            {value: "push", label: "laptop → device"},
+                            {value: "pull", label: "device → laptop"},
+                        ]
+                        value: dlg.draft.direction || "push"
+                        onActivated: v => dlg.set("direction", v)
+                    }
+                }
+
                 // ---- Source | Destination side-by-side panels -------------
                 RowLayout {
                     Layout.fillWidth: true
@@ -203,7 +219,8 @@ Dialog {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1   // equal split
                         Layout.alignment: Qt.AlignTop
-                        title: "Source"
+                        title: dlg.draft.direction === "pull"
+                               ? "Laptop folder (copy to)" : "Source"
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -292,7 +309,8 @@ Dialog {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1   // equal split
                         Layout.alignment: Qt.AlignTop
-                        title: "Destination"
+                        title: dlg.draft.direction === "pull"
+                               ? "Device (copy from)" : "Destination"
 
                         GridLayout {
                             anchors.fill: parent

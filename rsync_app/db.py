@@ -22,6 +22,7 @@ BINDING_DEFAULTS = {
     "chmod_value": None,
     **{o["key"]: int(o["default"]) for o in OPTIONS},
     "excludes": None,
+    "direction": "push",
 }
 
 # Every writable bindings column, in schema order.
@@ -54,6 +55,8 @@ CREATE TABLE {ine}{name} (
     chmod_value      TEXT,
     {_OPT_COLS_SQL},
     excludes         TEXT,
+    direction        TEXT NOT NULL DEFAULT 'push'
+                     CHECK (direction IN ('push', 'pull')),
     UNIQUE (source_label_id, dest_device_id, dest_subpath)
 );
 """
@@ -124,6 +127,7 @@ class Database(QObject):
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA)
         self._migrate_baseline_opts()
+        self._migrate_direction()
         self._migrate_source_unique()
         self._migrate_options_ux()
         self._migrate_import_copy_mode()
@@ -145,6 +149,18 @@ class Database(QObject):
                     f"ALTER TABLE bindings ADD COLUMN {col} "
                     f"INTEGER NOT NULL DEFAULT 1 CHECK ({col} IN (0, 1))"
                 )
+
+    def _migrate_direction(self) -> None:
+        """Add direction to a pre-existing bindings table ('push' = the
+        original laptop → device behavior). Runs before _migrate_options_ux
+        so that rebuild's SELECT finds every BINDING_COLS column."""
+        have = {row["name"] for row in
+                self._conn.execute("PRAGMA table_info(bindings)")}
+        if "direction" not in have:
+            self._conn.execute(
+                "ALTER TABLE bindings ADD COLUMN direction TEXT NOT NULL "
+                "DEFAULT 'push' CHECK (direction IN ('push', 'pull'))"
+            )
 
     def _migrate_import_copy_mode(self) -> None:
         """Add copy_mode to a pre-existing import_jobs table (0 = the

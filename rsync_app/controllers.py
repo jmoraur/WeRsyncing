@@ -249,11 +249,13 @@ class ConnectionsController(QObject):
             return "destination device is not mounted"
         if not os.path.ismount(mp):
             return f"destination mountpoint is gone: {mp}"
-        dest = argv[-1] if argv else ""
+        # The device path is the last argv entry for a push and the
+        # second-to-last for a pull (device → laptop); a stale one there
+        # would --delete laptop files against an empty directory.
         root = mp.rstrip("/") or "/"
         prefix = root if root.endswith("/") else root + "/"
-        if dest != root and not dest.startswith(prefix):
-            return (f"destination path {dest!r} is outside the current "
+        if not any(p == root or p.startswith(prefix) for p in argv[-2:]):
+            return (f"device path {argv[-2:]!r} is outside the current "
                     f"mountpoint {mp!r} — device remounted since the "
                     f"run was confirmed")
         return None
@@ -475,7 +477,7 @@ class ConnectionsController(QObject):
             if s is None or d is None:
                 continue
             reachable = self._device_liveness(d, mounts, probe_state) == "live"
-            out.append({
+            row = {
                 "id": b["id"],
                 "sourceLabel": s["label"],
                 "sourceDisplay": self._source_display(s),
@@ -491,8 +493,19 @@ class ConnectionsController(QObject):
                     self._preflight_dest_ctx(d, b["dest_subpath"] or "",
                                              mounts, reachable),
                 ),
-            })
+            }
+            if b.get("direction") == "pull":
+                self._swap_sides(row)
+            out.append(row)
         return out
+
+    @staticmethod
+    def _swap_sides(row: dict) -> None:
+        """Pull rows show the data flow: device first, laptop folder second."""
+        for a, b in (("sourceLabel", "destLabel"),
+                     ("sourceDisplay", "destFull"),
+                     ("sourcePath", "destDisplay")):
+            row[a], row[b] = row[b], row[a]
 
     @Slot(result="QVariantList")
     def optionCatalog(self) -> list:
@@ -665,6 +678,9 @@ class ConnectionsController(QObject):
         s = sources_by_id.get(b["source_label_id"])
         source_label = self._source_display(s)
         source_path = s["path"] if s else ""
+        dest_display = self._dest_display(d, b["dest_subpath"], mounts)
+        if b.get("direction") == "pull":
+            source_path, dest_display = dest_display, source_path
         return {
             "rowType": "connection",
             "nodeId": b["id"],
@@ -677,7 +693,7 @@ class ConnectionsController(QObject):
             "mountpoint": mounts.get(d["uuid"], "") if d["kind"] == "local"
                           else "",
             "sourcePath": source_path,
-            "destDisplay": self._dest_display(d, b["dest_subpath"], mounts),
+            "destDisplay": dest_display,
             "destSubpath": b["dest_subpath"],
             "canSync": liveness == "live",
             "containerId": container_id,

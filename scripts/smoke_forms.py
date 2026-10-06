@@ -61,6 +61,11 @@ def main() -> int:
                            "chown_mode": "custom",
                            "chown_value": "nobody:users",
                            "chmod_value": "D755,F644"})
+    # Pull binding (device → laptop): swapped display + direction switch.
+    bid4 = db.add_binding({"source_label_id": sid,
+                           "dest_device_id": did_remote,
+                           "dest_subpath": "backups",
+                           "direction": "pull", "opt_delete": True})
     # Import-job fixture: real folders so the confirm dialog preflights
     # clean (bar the archive-not-scanned warning, which we want visible).
     imp_root = OUT / "import-fixture"
@@ -163,6 +168,12 @@ def main() -> int:
     add("03b_connection_form_edit_custom", open_cf_custom)
     add("__close", lambda: close_dialog(cf_custom["dlg"]))
 
+    cf_pull = {"dlg": None}
+    def open_cf_pull():
+        cf_pull["dlg"] = open_dialog("connectionForm", {"bindingId": bid4})
+    add("03c_connection_form_edit_pull", open_cf_pull)
+    add("__close", lambda: close_dialog(cf_pull["dlg"]))
+
     # 4. SourceLabelForm (edit)
     sf_state = {"dlg": None}
     def open_sf():
@@ -235,6 +246,15 @@ def main() -> int:
                                         "scopeId": did})
     add("10_sync_confirm_multi", open_scm)
     add("__close", lambda: close_dialog(scm_state["dlg"]))
+
+    # 10b. SyncConfirmDialog (remote device scope — push + pull together).
+    scr_state = {"dlg": None}
+    def open_scr():
+        scr_state["dlg"] = open_dialog("syncConfirmDialog",
+                                       {"scopeKind": "device",
+                                        "scopeId": did_remote})
+    add("10b_sync_confirm_multi_pull", open_scr)
+    add("__close", lambda: close_dialog(scr_state["dlg"]))
 
     # 11. ImportJobForm (edit — clean paths, live preflight issue list).
     ijf_state = {"dlg": None}

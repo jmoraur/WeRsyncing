@@ -118,7 +118,13 @@ def build_rsync_argv(
         argv.append(f"--rsh={rsh}")
 
     path_mode = _effective(binding_row, runtime_overrides, "path_mode")
-    argv.append(_resolve_path(source, path_mode))
-    argv.append(_resolve_path(dest, path_mode))
+    laptop = _resolve_path(source, path_mode)
+    device = _resolve_path(dest, path_mode)
+    # "pull" copies device → laptop: same flags, the two paths swap. The
+    # binding keeps naming them source/dest (laptop folder / device side).
+    if binding_row.get("direction") == "pull":
+        argv += [device, laptop]
+    else:
+        argv += [laptop, device]
 
     return argv

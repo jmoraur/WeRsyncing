@@ -22,8 +22,11 @@ def check_binding(row: dict, source: dict, dest: dict) -> list[dict]:
     "subpath": <dest_subpath>, "available": <bool>}`.
     """
     issues: list[dict] = []
-    _check_source(source, issues)
-    _check_dest(dest, issues)
+    if row.get("direction") == "pull":
+        _check_pull(source, dest, issues)
+    else:
+        _check_source(source, issues)
+        _check_dest(dest, issues)
     _check_warnings(row, source, dest, issues)
     return issues
 
@@ -86,12 +89,50 @@ def _check_dest(dest: dict, issues: list[dict]) -> None:
             ))
 
 
+def _check_pull(source: dict, dest: dict, issues: list[dict]) -> None:
+    """Pull = device → laptop: the device side must be there to read
+    from, the laptop folder must be creatable/writable."""
+    kind = (dest or {}).get("kind", "")
+    available = bool((dest or {}).get("available"))
+    if kind == "local":
+        if not available:
+            issues.append(_err(
+                "E_DEST_NOT_MOUNTED",
+                "The drive to copy from is not connected.",
+            ))
+        else:
+            resolved = _resolved_dest_path(dest)
+            if not os.path.isdir(resolved):
+                issues.append(_err(
+                    "E_PULL_FROM_MISSING",
+                    f"The folder to copy from can't be found: {resolved}",
+                ))
+    elif kind == "remote" and not available:
+        issues.append(_err(
+            "E_REMOTE_UNREACHABLE",
+            "The server did not respond. Check that it's online.",
+        ))
+
+    path = (source or {}).get("path") or ""
+    if not path:
+        issues.append(_err("E_SRC_MISSING", "The laptop folder is not set."))
+        return
+    ancestor = _existing_ancestor(path)
+    if ancestor is None or not os.access(ancestor, os.W_OK):
+        issues.append(_err(
+            "E_PULL_TO_UNWRITABLE",
+            f"The laptop folder can't be written to: {ancestor or path}",
+        ))
+
+
 def _check_warnings(row: dict, source: dict, dest: dict,
                     issues: list[dict]) -> None:
     if row.get("opt_delete"):
+        where = ("in the laptop folder" if row.get("direction") == "pull"
+                 else "on the destination")
         issues.append(_warn(
             "W_DELETE_ENABLED",
-            "Files that exist only on the destination will be deleted"
+            f"Files that exist only {where} will be deleted"
             " (--delete is on).",
         ))
 
