@@ -1,4 +1,3 @@
-import os.path
 import shutil
 import sqlite3
 from pathlib import Path
@@ -12,7 +11,7 @@ _UNSET = object()
 _BOOL_COLS = frozenset(o["key"] for o in OPTIONS)
 
 # A job is rsync: from (device + path) → to (device + path) + options.
-# Defaults for everything but the group and the two devices; option
+# Defaults for everything but the bundle and the two devices; option
 # defaults come straight from the rsync catalog.
 JOB_DEFAULTS = {
     "name": "",
@@ -27,7 +26,7 @@ JOB_DEFAULTS = {
 }
 
 # Every writable jobs column.
-JOB_COLS = ("group_id", "from_device_id", "to_device_id", *JOB_DEFAULTS)
+JOB_COLS = ("bundle_id", "from_device_id", "to_device_id", *JOB_DEFAULTS)
 
 DEVICE_COLS = ("label", "kind", "uuid", "host", "rsh")
 
@@ -37,33 +36,10 @@ _OPT_COLS_SQL = ",\n    ".join(
     for o in OPTIONS
 )
 
-# Devices are places folders live: the laptop itself, a drive (found by
-# filesystem UUID, path relative to its mountpoint) or a server reached
-# over ssh (`host` = "user@host", path absolute on the server).
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS groups (
-    id       INTEGER PRIMARY KEY,
-    label    TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS devices (
-    id     INTEGER PRIMARY KEY,
-    label  TEXT NOT NULL,
-    kind   TEXT NOT NULL CHECK (kind IN ('laptop', 'drive', 'server')),
-    uuid   TEXT UNIQUE,
-    host   TEXT,
-    rsh    TEXT,
-    CHECK (
-        (kind = 'laptop' AND uuid IS NULL AND host IS NULL) OR
-        (kind = 'drive'  AND uuid IS NOT NULL AND host IS NULL) OR
-        (kind = 'server' AND host IS NOT NULL AND uuid IS NULL)
-    )
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
+_JOBS_SQL = f"""
+CREATE TABLE IF NOT EXISTS {{table}} (
     id              INTEGER PRIMARY KEY,
-    group_id        INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    bundle_id       INTEGER REFERENCES bundles(id) ON DELETE SET NULL,
     name            TEXT NOT NULL DEFAULT '',
     from_device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     from_path       TEXT NOT NULL DEFAULT '',
@@ -77,6 +53,37 @@ CREATE TABLE IF NOT EXISTS jobs (
     chmod_value     TEXT,
     {_OPT_COLS_SQL},
     excludes        TEXT
+);
+"""
+
+# Devices are places folders live: the laptop itself, a drive (found by
+# filesystem UUID, path relative to its mountpoint) or a server reached
+# over ssh (`host` = "user@host", path absolute on the server). Their
+# position orders the top rows of the list.
+# A bundle holds jobs (and other bundles) that share one from-device and
+# one to-device; it only shapes the list and what a sync button runs.
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS devices (
+    id       INTEGER PRIMARY KEY,
+    label    TEXT NOT NULL,
+    kind     TEXT NOT NULL CHECK (kind IN ('laptop', 'drive', 'server')),
+    uuid     TEXT UNIQUE,
+    host     TEXT,
+    rsh      TEXT,
+    position INTEGER NOT NULL DEFAULT 0,
+    CHECK (
+        (kind = 'laptop' AND uuid IS NULL AND host IS NULL) OR
+        (kind = 'drive'  AND uuid IS NOT NULL AND host IS NULL) OR
+        (kind = 'server' AND host IS NOT NULL AND uuid IS NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS bundles (
+    id              INTEGER PRIMARY KEY,
+    label           TEXT NOT NULL,
+    parent_id       INTEGER REFERENCES bundles(id) ON DELETE CASCADE,
+    from_device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    to_device_id    INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS import_jobs (
@@ -102,17 +109,6 @@ def _coerce(col: str, value):
     return value
 
 
-def _split_target(target: str) -> tuple[str, str]:
-    """'root@nas:/mnt/user' -> ('root@nas', '/mnt/user')."""
-    host, _, path = (target or "").partition(":")
-    return host, path or "/"
-
-
-def _join(base: str, sub: str) -> str:
-    base, sub = (base or "").rstrip("/"), (sub or "").strip("/")
-    return f"{base}/{sub}" if sub else (base or "/")
-
-
 class Database(QObject):
     db_changed = Signal()
 
@@ -122,11 +118,16 @@ class Database(QObject):
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
-        old = self._has_table("bindings")
+        if self._has_table("bindings"):
+            raise RuntimeError(
+                "This database is from before WeRsyncing 0.10; open it with "
+                "0.10 once to convert it first.")
+        has_groups = self._has_table("groups")
         self._conn.executescript(SCHEMA)
         self._migrate_import_copy_mode()
-        if old:
-            self._migrate_to_jobs()
+        if has_groups:
+            self._migrate_to_bundles()
+        self._conn.executescript(_JOBS_SQL.format(table="jobs"))
         if not self._conn.execute(
                 "SELECT 1 FROM devices WHERE kind = 'laptop'").fetchone():
             self._conn.execute(
@@ -149,126 +150,42 @@ class Database(QObject):
                 "INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))"
             )
 
-    def _migrate_to_jobs(self) -> None:
-        """One-time conversion of the pre-0.10 model (source_labels /
-        dest_containers / dest_devices / bindings with a push/pull swap)
-        into groups / devices / jobs where every job states its real
-        from and to. Ids of groups and jobs are kept. Expects the 0.9 shape
-        (older DBs: run 0.9 once first). Writes rsync.db.pre-jobs.bak."""
-        backup = self.path.with_name(self.path.name + ".pre-jobs.bak")
+    def _migrate_to_bundles(self) -> None:
+        """One-time conversion of the 0.10 shape (groups + jobs.group_id)
+        to 0.11: groups go, their order becomes the order of the devices
+        named like them (others follow), jobs lose group_id and start
+        outside any bundle. Every job keeps its id and its columns.
+        Writes rsync.db.pre-bundles.bak first."""
+        backup = self.path.with_name(self.path.name + ".pre-bundles.bak")
         self._conn.commit()
         if self.path.exists() and not backup.exists():
             shutil.copy2(self.path, backup)
-        q = lambda sql: [dict(r) for r in self._conn.execute(sql)]
-        containers = q("SELECT * FROM dest_containers")
-        old_devices = q("SELECT * FROM dest_devices ORDER BY id")
-        sources = {s["id"]: s for s in q("SELECT * FROM source_labels")}
-        bindings = q("SELECT * FROM bindings ORDER BY id")
-
         c = self._conn
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(devices)")}
+        if "position" not in cols:
+            c.execute("ALTER TABLE devices ADD COLUMN position "
+                      "INTEGER NOT NULL DEFAULT 0")
+        groups = [g["label"] for g in c.execute(
+            "SELECT label FROM groups ORDER BY position, label")]
+        devices = [dict(d) for d in c.execute(
+            "SELECT id, label, kind FROM devices "
+            "ORDER BY kind != 'laptop', label")]
+        rank = lambda d: (groups.index(d["label"]) if d["label"] in groups
+                          else len(groups))
+        c.executemany("UPDATE devices SET position = ? WHERE id = ?",
+                      [(pos, d["id"]) for pos, d in
+                       enumerate(sorted(devices, key=rank))])
+        keep = [r["name"] for r in c.execute("PRAGMA table_info(jobs)")
+                if r["name"] != "group_id"]
+        c.commit()
         c.execute("BEGIN")
-        for g in containers:
-            c.execute("INSERT INTO groups(id, label, position) VALUES (?,?,?)",
-                      (g["id"], g["label"], g.get("position") or 0))
-        laptop = c.execute("INSERT INTO devices(label, kind) VALUES "
-                           "('Laptop', 'laptop')").lastrowid
-        # Old servers carried a base path in their target; one server
-        # (same user@host + ssh settings) becomes one device. Its name is
-        # the old entry with the most jobs.
-        uses = {}
-        for b in bindings:
-            uses[b["dest_device_id"]] = uses.get(b["dest_device_id"], 0) + 1
-        new_id, servers = {}, {}
-        for d in sorted(old_devices, key=lambda d: -uses.get(d["id"], 0)):
-            if d["kind"] == "local":
-                new_id[d["id"]] = c.execute(
-                    "INSERT INTO devices(label, kind, uuid) VALUES "
-                    "(?, 'drive', ?)", (d["label"], d["uuid"])).lastrowid
-                continue
-            host, _ = _split_target(d["network_target"])
-            key = (host, d.get("rsh") or "")
-            if key not in servers:
-                servers[key] = c.execute(
-                    "INSERT INTO devices(label, kind, host, rsh) VALUES "
-                    "(?, 'server', ?, ?)",
-                    (d["label"], host, d.get("rsh") or None)).lastrowid
-            new_id[d["id"]] = servers[key]
-
-        devices_by_old = {d["id"]: d for d in old_devices}
-        opt_keys = [o["key"] for o in OPTIONS]
-        for b in bindings:
-            d = devices_by_old[b["dest_device_id"]]
-            s = sources[b["source_label_id"]]
-            if d["kind"] == "local":
-                dev_path = (b["dest_subpath"] or "").strip("/")
-            else:
-                dev_path = _join(_split_target(d["network_target"])[1],
-                                 b["dest_subpath"])
-            laptop_side = (laptop, s["path"])
-            dev_side = (new_id[d["id"]], dev_path)
-            pull = b.get("direction") == "pull"
-            frm, to = (dev_side, laptop_side) if pull else (laptop_side, dev_side)
-            # Pull jobs were titled by their laptop folder ("Appdata
-            # Backups"), not the server folder name; keep that title.
-            name = os.path.basename(s["path"].rstrip("/")) if pull else ""
-            row = {
-                "id": b["id"], "group_id": d["container_id"], "name": name,
-                "from_device_id": frm[0], "from_path": frm[1],
-                "to_device_id": to[0], "to_path": to[1],
-                "path_mode": b["path_mode"], "chown_mode": b["chown_mode"],
-                "chown_value": b["chown_value"],
-                "chmod_value": b["chmod_value"],
-                "excludes": b["excludes"],
-                **{k: b.get(k, int(o["default"]))
-                   for k, o in zip(opt_keys, OPTIONS)},
-            }
-            c.execute(f"INSERT INTO jobs({', '.join(row)}) VALUES "
-                      f"({', '.join('?' * len(row))})", list(row.values()))
-        for t in ("bindings", "dest_devices", "source_labels",
-                  "dest_containers"):
-            c.execute(f"DROP TABLE {t}")
+        c.execute(_JOBS_SQL.format(table="jobs_new"))
+        c.execute(f"INSERT INTO jobs_new({', '.join(keep)}) "
+                  f"SELECT {', '.join(keep)} FROM jobs")
+        c.execute("DROP TABLE jobs")
+        c.execute("ALTER TABLE jobs_new RENAME TO jobs")
+        c.execute("DROP TABLE groups")
         c.execute("COMMIT")
-
-    # --- groups -------------------------------------------------------------
-
-    def add_group(self, *, label: str) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO groups(label, position) VALUES "
-            "(?, (SELECT COALESCE(MAX(position) + 1, 0) FROM groups))",
-            (label,))
-        self._conn.commit()
-        self.db_changed.emit()
-        return cur.lastrowid
-
-    def update_group(self, group_id: int, *, label=_UNSET) -> None:
-        changes = self._collect_changes(["label"], locals())
-        self._apply_update("groups", group_id, changes)
-
-    def delete_group(self, group_id: int) -> None:
-        self._conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
-        self._conn.commit()
-        self.db_changed.emit()
-
-    def list_groups(self) -> list[dict]:
-        return [dict(r) for r in self._conn.execute(
-            "SELECT * FROM groups ORDER BY position, label")]
-
-    def move_group(self, group_id: int, delta: int) -> None:
-        """Swap a group with its neighbour (delta -1 = up, +1 = down).
-        Renumbers every group 0..n-1 so positions stay distinct."""
-        ids = [g["id"] for g in self.list_groups()]
-        if group_id not in ids:
-            return
-        i = ids.index(group_id)
-        j = i + delta
-        if not 0 <= j < len(ids):
-            return
-        ids[i], ids[j] = ids[j], ids[i]
-        self._conn.executemany(
-            "UPDATE groups SET position = ? WHERE id = ?",
-            [(pos, gid) for pos, gid in enumerate(ids)])
-        self._conn.commit()
-        self.db_changed.emit()
 
     # --- devices ------------------------------------------------------------
 
@@ -295,21 +212,104 @@ class Database(QObject):
         self.db_changed.emit()
 
     def list_devices(self) -> list[dict]:
-        # Laptop first, then by name.
+        # The user's order (↑/↓ on the top rows), then laptop first, name.
         return [dict(r) for r in self._conn.execute(
-            "SELECT * FROM devices ORDER BY kind != 'laptop', label")]
+            "SELECT * FROM devices ORDER BY position, kind != 'laptop', label")]
+
+    def move_device(self, device_id: int, delta: int,
+                    among: list[int] | None = None) -> None:
+        """Swap a device with its neighbour among `among` (the top rows
+        the user sees; all devices if None). delta -1 = up, +1 = down.
+        Renumbers every device so positions stay distinct."""
+        ids = [d["id"] for d in self.list_devices()]
+        shown = [i for i in ids if among is None or i in among]
+        if device_id not in shown:
+            return
+        k = shown.index(device_id) + delta
+        if not 0 <= k < len(shown):
+            return
+        i, j = ids.index(device_id), ids.index(shown[k])
+        ids[i], ids[j] = ids[j], ids[i]
+        self._conn.executemany(
+            "UPDATE devices SET position = ? WHERE id = ?",
+            [(pos, did) for pos, did in enumerate(ids)])
+        self._conn.commit()
+        self.db_changed.emit()
+
+    # --- bundles ------------------------------------------------------------
+
+    def list_bundles(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM bundles ORDER BY label COLLATE NOCASE, id")]
+
+    def add_bundle(self, *, label: str, from_device_id: int,
+                   to_device_id: int, parent_id: int | None = None,
+                   job_ids=(), bundle_ids=()) -> int:
+        """Create a bundle and move the given jobs / bundles into it."""
+        c = self._conn
+        bid = c.execute(
+            "INSERT INTO bundles(label, parent_id, from_device_id, "
+            "to_device_id) VALUES (?, ?, ?, ?)",
+            (label, parent_id, from_device_id, to_device_id)).lastrowid
+        c.executemany("UPDATE jobs SET bundle_id = ? WHERE id = ?",
+                      [(bid, j) for j in job_ids])
+        c.executemany("UPDATE bundles SET parent_id = ? WHERE id = ?",
+                      [(bid, b) for b in bundle_ids if b != bid])
+        self._commit_pruned()
+        return bid
+
+    def rename_bundle(self, bundle_id: int, label: str) -> None:
+        self._apply_update("bundles", bundle_id, {"label": label})
+
+    def unbundle(self, bundle_id: int) -> None:
+        """Remove a bundle; what it held moves up one level."""
+        c = self._conn
+        row = c.execute("SELECT parent_id FROM bundles WHERE id = ?",
+                        (bundle_id,)).fetchone()
+        if row is None:
+            return
+        c.execute("UPDATE jobs SET bundle_id = ? WHERE bundle_id = ?",
+                  (row["parent_id"], bundle_id))
+        c.execute("UPDATE bundles SET parent_id = ? WHERE parent_id = ?",
+                  (row["parent_id"], bundle_id))
+        c.execute("DELETE FROM bundles WHERE id = ?", (bundle_id,))
+        self._commit_pruned()
+
+    def take_out(self, job_ids=(), bundle_ids=()) -> None:
+        """Move jobs / bundles one level up, out of the bundle they're in."""
+        c = self._conn
+        c.executemany(
+            "UPDATE jobs SET bundle_id = (SELECT parent_id FROM bundles "
+            "WHERE bundles.id = jobs.bundle_id) WHERE id = ?",
+            [(j,) for j in job_ids])
+        c.executemany(
+            "UPDATE bundles SET parent_id = (SELECT p.parent_id FROM bundles p "
+            "WHERE p.id = bundles.parent_id) WHERE id = ?",
+            [(b,) for b in bundle_ids])
+        self._commit_pruned()
+
+    def _commit_pruned(self) -> None:
+        """Drop bundles left empty (no jobs, no bundles inside), commit,
+        notify."""
+        while self._conn.execute(
+                "DELETE FROM bundles WHERE id NOT IN (SELECT bundle_id FROM "
+                "jobs WHERE bundle_id IS NOT NULL) AND id NOT IN (SELECT "
+                "parent_id FROM bundles WHERE parent_id IS NOT NULL)"
+                ).rowcount:
+            pass
+        self._conn.commit()
+        self.db_changed.emit()
 
     # --- jobs ---------------------------------------------------------------
 
     def add_job(self, values: dict) -> int:
         """Insert a job. Unknown keys are ignored, missing option columns
-        take the catalog defaults. Needs group_id and both device ids."""
+        take the catalog defaults. Needs both device ids."""
         row = dict(JOB_DEFAULTS)
         row.update({k: _coerce(k, v) for k, v in values.items()
                     if k in JOB_COLS})
-        if not all(row.get(k) for k in
-                   ("group_id", "from_device_id", "to_device_id")):
-            raise ValueError("job needs group_id, from_device_id, to_device_id")
+        if not all(row.get(k) for k in ("from_device_id", "to_device_id")):
+            raise ValueError("job needs from_device_id and to_device_id")
         cur = self._conn.execute(
             f"INSERT INTO jobs({', '.join(row)}) VALUES "
             f"({', '.join('?' * len(row))})", list(row.values()))
@@ -318,15 +318,21 @@ class Database(QObject):
         return cur.lastrowid
 
     def update_job(self, job_id: int, values: dict) -> None:
-        """Update the given columns of a job; unknown keys are ignored."""
+        """Update the given columns of a job; unknown keys are ignored.
+        A job whose devices no longer match its bundle leaves the bundle."""
         self._apply_update("jobs", job_id,
                            {k: _coerce(k, v) for k, v in values.items()
                             if k in JOB_COLS})
+        self._conn.execute(
+            "UPDATE jobs SET bundle_id = NULL WHERE id = ? AND bundle_id IN "
+            "(SELECT b.id FROM bundles b WHERE b.from_device_id != "
+            "jobs.from_device_id OR b.to_device_id != jobs.to_device_id)",
+            (job_id,))
+        self._commit_pruned()
 
     def delete_job(self, job_id: int) -> None:
         self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
-        self._conn.commit()
-        self.db_changed.emit()
+        self._commit_pruned()
 
     def list_jobs(self) -> list[dict]:
         return [dict(r) for r in self._conn.execute(

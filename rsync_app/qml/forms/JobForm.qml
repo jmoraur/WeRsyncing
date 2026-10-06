@@ -5,7 +5,7 @@ import Qt.labs.platform as Labs
 import "../components"
 
 // Job form. A job is rsync: From (device + path) → To (device + path)
-// + options, filed under a group. The live command preview and the
+// + options. Bundles are made in the list (select → right-click). The live command preview and the
 // checks stay pinned at the bottom.
 //
 // State lives in one `draft` map mirroring the jobs columns; every change
@@ -16,7 +16,7 @@ import "../components"
 // it's mounted); server = absolute path on the server.
 //
 // Modes: jobId === -1 → add, else → edit. Prefills for "new job here":
-// initialGroupId / initialToDeviceId.
+// initialFromDeviceId / initialToDeviceId.
 Dialog {
     id: dlg
     modal: true
@@ -29,12 +29,11 @@ Dialog {
     height: Math.min(parent ? parent.height - 40 : 760, 760)
 
     property int jobId: -1
-    property int initialGroupId: -1
+    property int initialFromDeviceId: -1
     property int initialToDeviceId: -1
 
     property var draft: ({})
     property var _catalog: []
-    property var _groups: []
     property var _devices: []
     property string _skipWarning: ""
 
@@ -54,7 +53,7 @@ Dialog {
 
     function _defaults() {
         const d = {
-            group_id: 0, name: "",
+            name: "",
             from_device_id: 0, from_path: "",
             to_device_id: 0, to_path: "",
             path_mode: "contents", chown_mode: "source",
@@ -62,13 +61,6 @@ Dialog {
         }
         for (const o of _catalog) d[o.key] = o.default ? 1 : 0
         return d
-    }
-
-    function _refreshGroups(preselectId) {
-        _groups = connections.pickableGroups()
-        const idx = _groups.findIndex(g => g.id === preselectId)
-        groupCombo.currentIndex = idx
-        set("group_id", idx === -1 ? 0 : preselectId)
     }
 
     function _refreshDevices() {
@@ -115,25 +107,24 @@ Dialog {
             for (const k in d)
                 if (j[k] !== undefined && j[k] !== null) d[k] = j[k]
         } else {
-            d.group_id = dlg.initialGroupId
             d.to_device_id = dlg.initialToDeviceId > 0 ? dlg.initialToDeviceId : 0
-            // New jobs start from this computer — the usual case.
+            d.from_device_id = dlg.initialFromDeviceId > 0
+                               ? dlg.initialFromDeviceId : 0
+            // Otherwise new jobs start from this computer — the usual case.
             const laptop = connections.pickableDevices()
                 .find(x => x.kind === "laptop")
-            if (laptop && d.to_device_id !== laptop.id)
+            if (!d.from_device_id && laptop && d.to_device_id !== laptop.id)
                 d.from_device_id = laptop.id
         }
         draft = d
         nameField.text = d.name || ""
         excludesArea.text = d.excludes || ""
         ownershipEditor.load()
-        _refreshGroups(d.group_id)
         _refreshDevices()
     }
 
     onAccepted: {
-        if (!(draft.group_id > 0) || !(draft.from_device_id > 0)
-                || !(draft.to_device_id > 0))
+        if (!(draft.from_device_id > 0) || !(draft.to_device_id > 0))
             return
         let newId = dlg.jobId
         if (dlg.jobId === -1) newId = connections.addJob(draft)
@@ -263,37 +254,12 @@ Dialog {
                 width: parent.width
                 spacing: Theme.s3
 
-                // ---- Group + name ------------------------------------------
+                // ---- Name ------------------------------------------------
                 GridLayout {
                     Layout.fillWidth: true
                     columns: 2
                     columnSpacing: Theme.s2
                     rowSpacing: Theme.s2
-
-                    Label { text: "Group"; opacity: 0.75 }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: Theme.s1
-                        ScrollComboBox {
-                            id: groupCombo
-                            Layout.fillWidth: true
-                            model: dlg._groups
-                            textRole: "label"
-                            valueRole: "id"
-                            displayText: currentIndex === -1
-                                         ? "— pick a group —" : currentText
-                            onActivated: dlg.set("group_id", currentValue || 0)
-                        }
-                        RowActionButton {
-                            icon.name: "list-add"
-                            tip: "New group"
-                            onClicked: {
-                                childGroupForm.groupId = -1
-                                childGroupForm.initialLabel = ""
-                                childGroupForm.open()
-                            }
-                        }
-                    }
 
                     Label { text: "Name"; opacity: 0.75 }
                     TextField {
@@ -500,10 +466,6 @@ Dialog {
     }
 
     // ---- Inline-create child dialogs --------------------------------------
-    GroupForm {
-        id: childGroupForm
-        onAcceptedWithId: newId => dlg._refreshGroups(newId)
-    }
     DeviceForm {
         id: childDeviceForm
         property string forSide: "from"

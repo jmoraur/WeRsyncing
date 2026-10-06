@@ -4,7 +4,7 @@ import QtQuick.Layouts
 import "../components"
 
 // Delete confirmation as a modal pop-up window: "You are about to delete
-// X. Are you sure?" Says what goes with it (a group's or device's jobs).
+// X. Are you sure?" Says what goes with it (a device's jobs).
 ThemedWindow {
     id: win
     title: "Confirm delete"
@@ -14,7 +14,7 @@ ThemedWindow {
     width: 520
     height: col.implicitHeight + 2 * Theme.s5
 
-    property string kind: ""     // group | device | job | importJob
+    property string kind: ""     // device | job | importJob
     property int    itemId: -1
     property string label: ""
     property int    _jobs: 0
@@ -28,8 +28,7 @@ ThemedWindow {
         requestActivate()
     }
 
-    readonly property string _what: kind === "group" ? "the group"
-                                  : kind === "device" ? "the device"
+    readonly property string _what: kind === "device" ? "the device"
                                   : kind === "importJob" ? "the import"
                                   : "the job"
 

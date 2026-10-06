@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.10.3
+Version:        0.11.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,15 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.11.0-1
+- Bundles: select jobs (click, Ctrl+click, Shift+click), right-click ->
+  Bundle...; bundles can hold bundles, each has its own sync button.
+  Take out of bundle, Unbundle, Rename
+- Groups are gone: the list is destination -> source -> bundles -> jobs
+  (or source -> destination), top rows ordered with up/down. Existing
+  data is converted once, with a backup (rsync.db.pre-bundles.bak); every
+  job and its command stay the same
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.3-1
 - View switch reads "Group by: Destinations | Sources"
 

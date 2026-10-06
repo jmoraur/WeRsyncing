@@ -3,11 +3,16 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // One row of the jobs tree. `rowType` picks the variant:
-//   group / source / importHeader / devicesHeader → section header
-//   device       → a destination device inside a group (sub-group)
+//   top / importHeader / devicesHeader → section header (top = a device:
+//                  the destination or the source, by the Group by choice)
+//   device       → the other device of the pair, under a top row
+//   bundle       → a bundle of jobs (and bundles) of one device pair
 //   deviceEntry  → a device in the Devices list (edit / delete)
 //   job / importJob → one line (title) when folded; From / To / Options
 //                     + Edit / Delete when expanded
+//
+// Jobs and bundles can be selected (click, Ctrl+click, Shift+click) and
+// have a right-click menu; the page owns the selection and the menu.
 //
 // The sync button sits in one fixed column at the far left, so all run
 // actions line up; indentation starts after it. What a row syncs and
@@ -32,9 +37,11 @@ Item {
     required property int scopeId2
     required property string editKind
     required property int editId
-    required property int groupId
     required property int deviceId
+    required property int fromDeviceId
+    required property int toDeviceId
     required property string jobKey
+    required property string selectKey
     required property bool builtIn
     required property string groupKey
     required property bool hasChildren
@@ -42,21 +49,23 @@ Item {
     required property bool canMoveUp
     required property bool canMoveDown
 
-    // Job details open/closed — UI state owned by the page.
+    // Job details open/closed and selection — UI state owned by the page.
     property bool expanded: false
+    property bool selected: false
 
     signal syncRequested(string kind, int id, int id2)
     signal editRequested(string kind, int id)
     signal deleteRequested(string kind, int id, string label)
-    signal newJobRequested(int groupId, int toDeviceId)
+    signal newJobRequested(int fromDeviceId, int toDeviceId)
     signal newDeviceRequested()
     signal newImportRequested()
     signal toggleRequested(string groupKey)
     signal expandRequested(string key)
-    signal moveRequested(int groupId, int delta)
+    signal moveRequested(int deviceId, int delta)
+    signal selectRequested(string key, int modifiers)
+    signal menuRequested(string key)
 
-    readonly property bool isHeader: rowType === "group"
-                                     || rowType === "source"
+    readonly property bool isHeader: rowType === "top"
                                      || rowType === "importHeader"
                                      || rowType === "devicesHeader"
     readonly property bool isJob: rowType === "job" || rowType === "importJob"
@@ -76,7 +85,8 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: Theme.radius
-        color: row.isHeader ? Theme.surfaceAlt
+        color: row.selected ? Theme.tint(Theme.accent, Theme.dark ? 0.30 : 0.18)
+             : row.isHeader ? Theme.surfaceAlt
              : row.expanded ? Theme.tint(Theme.textColor, Theme.dark ? 0.05 : 0.03)
              : rowHover.hovered ? Theme.hoverBg
              : "transparent"
@@ -142,13 +152,30 @@ Item {
         Label {
             text: row.label
             font.weight: row.isHeader ? Font.DemiBold
-                       : row.isDevice ? Font.Medium
+                       : row.isDevice || row.rowType === "bundle" ? Font.Medium
                        : Font.Normal
             elide: Text.ElideRight
             Layout.fillWidth: row.where === ""
             Layout.maximumWidth: row.where !== "" ? implicitWidth : -1
             HoverHandler { cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: row._fold() }
+            // Jobs and bundles: click selects, double-click folds,
+            // right-click opens the menu. Other rows: click folds.
+            TapHandler {
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                onSingleTapped: (pt, button) => {
+                    if (row.selectKey === "") {
+                        if (button === Qt.LeftButton) row._fold()
+                    } else if (button === Qt.RightButton) {
+                        row.menuRequested(row.selectKey)
+                    } else {
+                        row.selectRequested(row.selectKey, point.modifiers)
+                    }
+                }
+                onDoubleTapped: (pt, button) => {
+                    if (row.selectKey !== "" && button === Qt.LeftButton)
+                        row._fold()
+                }
+            }
         }
 
         // Devices: where the device lives, dim.
@@ -175,26 +202,25 @@ Item {
             visible: !row.isJob && rowHover.hovered
 
             RowActionButton {
-                visible: row.rowType === "group"
+                visible: row.rowType === "top"
                 enabled: row.canMoveUp
                 icon.name: "go-up"
-                tip: "Move group up"
-                onClicked: row.moveRequested(row.groupId, -1)
+                tip: "Move up"
+                onClicked: row.moveRequested(row.deviceId, -1)
             }
             RowActionButton {
-                visible: row.rowType === "group"
+                visible: row.rowType === "top"
                 enabled: row.canMoveDown
                 icon.name: "go-down"
-                tip: "Move group down"
-                onClicked: row.moveRequested(row.groupId, 1)
+                tip: "Move down"
+                onClicked: row.moveRequested(row.deviceId, 1)
             }
             RowActionButton {
-                visible: row.rowType === "group"
-                         || (row.rowType === "device" && row.groupId >= 0)
+                visible: row.rowType === "device"
                 icon.name: "list-add"
                 tip: "New job here"
-                onClicked: row.newJobRequested(
-                    row.groupId, row.rowType === "device" ? row.deviceId : -1)
+                onClicked: row.newJobRequested(row.fromDeviceId,
+                                               row.toDeviceId)
             }
             RowActionButton {
                 visible: row.rowType === "devicesHeader"
@@ -211,13 +237,13 @@ Item {
             RowActionButton {
                 visible: row.editKind !== ""
                 icon.name: "document-edit"
-                tip: row.isDevice || row.rowType === "source"
+                tip: row.rowType === "bundle" ? "Rename bundle"
+                     : row.isDevice || row.rowType === "top"
                      ? "Edit device" : "Edit"
                 onClicked: row.editRequested(row.editKind, row.editId)
             }
             RowActionButton {
-                visible: row.rowType === "group"
-                         || (row.rowType === "deviceEntry" && !row.builtIn)
+                visible: row.rowType === "deviceEntry" && !row.builtIn
                 icon.name: "edit-delete"
                 danger: true
                 tip: "Delete"

@@ -4,8 +4,10 @@ ConnectionsController is a thin `@Slot`-decorated facade: QML drives
 Database writes through it and pulls pre-shaped read snapshots.
 
 The model is plain rsync: a job is from (device + path) → to (device +
-path) + options. Groups are labels that group jobs. Devices are the
-laptop, drives (by filesystem UUID) and servers (over ssh). Every place
+path) + options. Devices are the laptop, drives (by filesystem UUID) and
+servers (over ssh). Bundles (nestable) gather jobs that share one
+from-device and one to-device; they only shape the list and what a sync
+button runs. Every place
 that shows or runs a job resolves its two sides with `_endpoint`, so the
 list, the confirm popups and the command can never disagree.
 
@@ -42,24 +44,84 @@ class ConnectionsController(QObject):
         runner.set_pre_start_check(self._job_pre_start_error)
 
     # =====================================================================
-    # writes — groups
+    # writes — bundles + device order
     # =====================================================================
+    # Selection keys: "j<id>" = job, "b<id>" = bundle.
 
-    @Slot(str, result=int)
-    def addGroup(self, label: str) -> int:
-        return self._db.add_group(label=label)
+    def _items(self, keys: list) -> list[dict] | None:
+        """Selected jobs / bundles as {kind, id, pair, parent}; None if a
+        key no longer exists."""
+        jobs = {j["id"]: j for j in self._db.list_jobs()}
+        bundles = {b["id"]: b for b in self._db.list_bundles()}
+        out = []
+        for k in keys:
+            kind, id_ = str(k)[:1], int(str(k)[1:] or 0)
+            row = (jobs if kind == "j" else bundles).get(id_)
+            if row is None:
+                return None
+            parent = row["bundle_id"] if kind == "j" else row["parent_id"]
+            out.append({"kind": kind, "id": id_,
+                        "pair": (row["from_device_id"], row["to_device_id"]),
+                        "parent": parent if parent in bundles else None})
+        return out
+
+    @Slot("QVariantList", result=str)
+    def bundleProblem(self, keys: list) -> str:
+        """Why these can't be bundled together ("" = they can)."""
+        items = self._items(keys)
+        if not items:
+            return "nothing selected"
+        if len({i["pair"] for i in items}) > 1:
+            return "they don't share the same source and destination"
+        if len({i["parent"] for i in items}) > 1:
+            return "they are not at the same level"
+        return ""
+
+    @Slot("QVariantList", result=bool)
+    def canTakeOut(self, keys: list) -> bool:
+        items = self._items(keys)
+        return bool(items) and all(i["parent"] is not None for i in items)
+
+    @Slot("QVariantList", str, result=int)
+    def bundle(self, keys: list, label: str) -> int:
+        if self.bundleProblem(keys) or not label.strip():
+            return -1
+        items = self._items(keys)
+        frm, to = items[0]["pair"]
+        return self._db.add_bundle(
+            label=label.strip(), from_device_id=frm, to_device_id=to,
+            parent_id=items[0]["parent"],
+            job_ids=[i["id"] for i in items if i["kind"] == "j"],
+            bundle_ids=[i["id"] for i in items if i["kind"] == "b"])
 
     @Slot(int, str)
-    def updateGroup(self, group_id: int, label: str) -> None:
-        self._db.update_group(group_id, label=label)
-
-    @Slot(int, int)
-    def moveGroup(self, group_id: int, delta: int) -> None:
-        self._db.move_group(group_id, delta)
+    def renameBundle(self, bundle_id: int, label: str) -> None:
+        if label.strip():
+            self._db.rename_bundle(bundle_id, label.strip())
 
     @Slot(int)
-    def deleteGroup(self, group_id: int) -> None:
-        self._db.delete_group(group_id)
+    def unbundle(self, bundle_id: int) -> None:
+        self._db.unbundle(bundle_id)
+
+    @Slot("QVariantList")
+    def takeOut(self, keys: list) -> None:
+        items = self._items(keys) or []
+        self._db.take_out(
+            job_ids=[i["id"] for i in items if i["kind"] == "j"],
+            bundle_ids=[i["id"] for i in items if i["kind"] == "b"])
+
+    @Slot(int, result="QVariantMap")
+    def getBundle(self, bundle_id: int) -> dict:
+        return next((b for b in self._db.list_bundles()
+                     if b["id"] == bundle_id), {})
+
+    @Slot(int, int, str)
+    def moveDevice(self, device_id: int, delta: int, view: str) -> None:
+        """↑/↓ on a top row: swap with the neighbouring top row of the
+        view the user is looking at."""
+        side = "to_device_id" if view == "group" else "from_device_id"
+        self._db.move_device(device_id, delta,
+                             among=[j[side] for j in self._db.list_jobs()])
 
     # =====================================================================
     # writes — devices
@@ -261,11 +323,6 @@ class ConnectionsController(QObject):
     # =====================================================================
 
     @Slot(int, result="QVariantMap")
-    def getGroup(self, group_id: int) -> dict:
-        return next((g for g in self._db.list_groups()
-                     if g["id"] == group_id), {})
-
-    @Slot(int, result="QVariantMap")
     def getDevice(self, device_id: int) -> dict:
         return self._devices_by_id().get(device_id, {})
 
@@ -275,17 +332,11 @@ class ConnectionsController(QObject):
 
     @Slot(str, int, result=int)
     def jobCountFor(self, kind: str, id_: int) -> int:
-        """Jobs that go with a group or device when it's deleted."""
-        if kind == "group":
-            return sum(1 for j in self._db.list_jobs() if j["group_id"] == id_)
+        """Jobs that go with a device when it's deleted."""
         if kind == "device":
             return sum(1 for j in self._db.list_jobs()
                        if id_ in (j["from_device_id"], j["to_device_id"]))
         return 0
-
-    @Slot(result=list)
-    def pickableGroups(self) -> list[dict]:
-        return self._db.list_groups()
 
     @Slot(result=list)
     def pickableDevices(self) -> list[dict]:
@@ -378,23 +429,25 @@ class ConnectionsController(QObject):
     def jobsForScope(self, kind: str, scope_id: int, scope_id2: int) -> list:
         """Jobs a sync button covers, resolved for the confirm popups.
 
-        kind: "job" (id) · "group" (group id) · "groupDevice" (group id,
-        destination device id) · "source" (from-device id) · "sourceDevice"
-        (from-device id, destination device id).
+        kind: "job" (id) · "to" (to-device id) · "from" (from-device id)
+        · "pair" (from-device id, to-device id) · "bundle" (id; every job
+        inside it, at any depth).
         """
+        if kind == "bundle":
+            inside = self._subtree(scope_id, self._db.list_bundles())
+
         def picked(j):
             if kind == "job":
                 return j["id"] == scope_id
-            if kind == "group":
-                return j["group_id"] == scope_id
-            if kind == "groupDevice":
-                return (j["group_id"] == scope_id
-                        and j["to_device_id"] == scope_id2)
-            if kind == "source":
+            if kind == "to":
+                return j["to_device_id"] == scope_id
+            if kind == "from":
                 return j["from_device_id"] == scope_id
-            if kind == "sourceDevice":
+            if kind == "pair":
                 return (j["from_device_id"] == scope_id
                         and j["to_device_id"] == scope_id2)
+            if kind == "bundle":
+                return j["bundle_id"] in inside
             raise ValueError(f"unknown scope kind {kind!r}")
 
         ctx = self._ctx()
@@ -422,79 +475,97 @@ class ConnectionsController(QObject):
     # =====================================================================
 
     @Slot(result=list)
-    def byGroup(self) -> list[dict]:
-        """Groups view: group → destination device → jobs, then Imports
-        and Devices."""
-        ctx = self._ctx()
-        jobs = self._db.list_jobs()
-        rows: list[dict] = []
-        for g in self._db.list_groups():
-            g_jobs = [j for j in jobs if j["group_id"] == g["id"]]
-            views = [v for j in g_jobs if (v := self._view(j, ctx))]
-            gkey = f"g{g['id']}"
-            rows.append(self._header_row(
-                "group", g["label"], gkey, views,
-                scope=("group", g["id"], 0), edit=("group", g["id"]),
-                groupId=g["id"],
-                empty="no jobs yet"))
-            for d in self._ordered_devices(
-                    {j["to_device_id"] for j in g_jobs}, ctx):
-                dviews = [v for v in views if v["job"]["to_device_id"] == d["id"]]
-                dkey = f"g{g['id']}d{d['id']}"
-                rows.append({
-                    **self._device_cols(d, ctx),
-                    "rowType": "device", "depth": 1,
-                    "groupKey": dkey, "_parents": [gkey],
-                    "aggregate": "",
-                    "canSync": any(v["ready"] for v in dviews),
-                    "scopeKind": "groupDevice", "scopeId": g["id"],
-                    "scopeId2": d["id"],
-                    "groupId": g["id"],
-                })
-                for v in sorted(dviews, key=lambda v: v["title"].lower()):
-                    rows.append(self._job_row(v, v["title"], 2,
-                                              [gkey, dkey]))
-        rows += self._import_rows() + self._device_list_rows(ctx)
-        return rows
+    def byDestination(self) -> list[dict]:
+        """Destinations view: to-device → from-device → bundles → jobs,
+        then Imports and Devices."""
+        return self._tree("to_device_id", "from_device_id", "to")
 
     @Slot(result=list)
     def bySource(self) -> list[dict]:
-        """Sources view: the device a job copies FROM → destination
-        device → jobs."""
+        """Sources view: from-device → to-device → bundles → jobs."""
+        return self._tree("from_device_id", "to_device_id", "from")
+
+    def _tree(self, top: str, sub: str, scope: str) -> list[dict]:
         ctx = self._ctx()
-        jobs = self._db.list_jobs()
+        views = [v for j in self._db.list_jobs() if (v := self._view(j, ctx))]
+        bundles = self._db.list_bundles()
         rows: list[dict] = []
-        for d in self._ordered_devices(
-                {j["from_device_id"] for j in jobs}, ctx):
-            views = [v for j in jobs if j["from_device_id"] == d["id"]
-                     and (v := self._view(j, ctx))]
-            skey = f"s{d['id']}"
+        for t in self._ordered_devices({v["job"][top] for v in views}, ctx):
+            tviews = [v for v in views if v["job"][top] == t["id"]]
+            tkey = f"{scope}{t['id']}"
+            ready = sum(1 for v in tviews if v["ready"])
             rows.append({
-                **self._header_row(
-                    "source", d["label"], skey, views,
-                    scope=("source", d["id"], 0), edit=("device", d["id"]),
-                    empty=""),
-                **{k: v for k, v in self._device_cols(d, ctx).items()
-                   if k in ("liveness", "where")},
+                **self._device_cols(t, ctx),
+                "rowType": "top", "depth": 0,
+                "groupKey": tkey, "_parents": [],
+                "aggregate": f"{ready}/{len(tviews)} ready",
+                "canSync": ready > 0,
+                "scopeKind": scope, "scopeId": t["id"], "scopeId2": 0,
             })
-            for t in self._ordered_devices(
-                    {v["job"]["to_device_id"] for v in views}, ctx):
-                tviews = [v for v in views if v["job"]["to_device_id"] == t["id"]]
-                tkey = f"s{d['id']}d{t['id']}"
+            for s in self._ordered_devices(
+                    {v["job"][sub] for v in tviews}, ctx):
+                pviews = [v for v in tviews if v["job"][sub] == s["id"]]
+                frm, to = ((s, t) if top == "to_device_id" else (t, s))
+                skey = f"{tkey}-{s['id']}"
                 rows.append({
-                    **self._device_cols(t, ctx),
+                    **self._device_cols(s, ctx),
                     "rowType": "device", "depth": 1,
-                    "groupKey": tkey, "_parents": [skey],
-                    "aggregate": "",
-                    "canSync": any(v["ready"] for v in tviews),
-                    "scopeKind": "sourceDevice", "scopeId": d["id"],
-                    "scopeId2": t["id"],
-                    "groupId": -1,
+                    "groupKey": skey, "_parents": [tkey],
+                    "canSync": any(v["ready"] for v in pviews),
+                    "scopeKind": "pair", "scopeId": frm["id"],
+                    "scopeId2": to["id"],
+                    "fromDeviceId": frm["id"], "toDeviceId": to["id"],
                 })
-                for v in sorted(tviews, key=lambda v: v["name"].lower()):
-                    rows.append(self._job_row(v, v["name"], 2, [skey, tkey]))
+                pair = [b for b in bundles
+                        if (b["from_device_id"], b["to_device_id"])
+                        == (frm["id"], to["id"])]
+                rows += self._bundle_rows(pviews, pair, None, 2, [tkey, skey])
         rows += self._import_rows() + self._device_list_rows(ctx)
         return rows
+
+    def _bundle_rows(self, views: list, bundles: list, parent, depth: int,
+                     parents: list) -> list[dict]:
+        """One level of a device pair: its bundles (each followed by its
+        own rows), then its jobs. A parent that isn't one of this pair's
+        bundles counts as the top level, so nothing can go missing."""
+        ids = {b["id"] for b in bundles}
+        up = lambda p: p if p in ids else None
+        rows = []
+        for b in bundles:
+            if up(b["parent_id"]) != parent:
+                continue
+            key = f"b{b['id']}"
+            inside = self._subtree(b["id"], bundles)
+            bviews = [v for v in views if v["job"]["bundle_id"] in inside]
+            rows.append({
+                "rowType": "bundle", "label": b["label"], "depth": depth,
+                "groupKey": key, "_parents": parents, "selectKey": key,
+                "aggregate": (f"{len(bviews)} job" if len(bviews) == 1
+                              else f"{len(bviews)} jobs"),
+                "canSync": any(v["ready"] for v in bviews),
+                "scopeKind": "bundle", "scopeId": b["id"], "scopeId2": 0,
+                "editKind": "bundle", "editId": b["id"],
+                "fromDeviceId": b["from_device_id"],
+                "toDeviceId": b["to_device_id"],
+            })
+            rows += self._bundle_rows(views, bundles, b["id"], depth + 1,
+                                      parents + [key])
+        for v in sorted((v for v in views
+                         if up(v["job"]["bundle_id"]) == parent),
+                        key=lambda v: v["name"].lower()):
+            rows.append(self._job_row(v, v["name"], depth, parents))
+        return rows
+
+    @staticmethod
+    def _subtree(bundle_id: int, bundles: list) -> set:
+        """A bundle's id plus the ids of every bundle inside it."""
+        out, todo = set(), [bundle_id]
+        while todo:
+            b = todo.pop()
+            if b not in out:
+                out.add(b)
+                todo += [x["id"] for x in bundles if x["parent_id"] == b]
+        return out
 
     # =====================================================================
     # internals
@@ -566,7 +637,7 @@ class ConnectionsController(QObject):
         }
 
     def _ordered_devices(self, ids: set, ctx: dict) -> list[dict]:
-        # list_devices order: laptop first, then by name.
+        # list_devices order: the user's order, then laptop first, name.
         return [d for d in self._db.list_devices() if d["id"] in ids]
 
     def _device_cols(self, d: dict, ctx: dict) -> dict:
@@ -578,27 +649,13 @@ class ConnectionsController(QObject):
                 "liveness": self._liveness(d, m, ctx["probes"]),
                 "where": where, "editKind": "device", "editId": d["id"]}
 
-    @staticmethod
-    def _header_row(row_type: str, label: str, key: str, views: list,
-                    scope: tuple, edit: tuple, empty: str,
-                    groupId: int = -1) -> dict:
-        ready = sum(1 for v in views if v["ready"])
-        return {
-            "rowType": row_type, "label": label, "depth": 0,
-            "groupKey": key, "_parents": [],
-            "aggregate": f"{ready}/{len(views)} ready" if views else empty,
-            "canSync": ready > 0,
-            "scopeKind": scope[0], "scopeId": scope[1], "scopeId2": scope[2],
-            "editKind": edit[0], "editId": edit[1], "groupId": groupId,
-        }
-
     def _job_row(self, v: dict, label: str, depth: int,
                  parents: list) -> dict:
         j = v["job"]
         return {
             "rowType": "job", "label": label, "depth": depth,
             "groupKey": "", "_parents": parents,
-            "jobKey": f"j{j['id']}",
+            "jobKey": f"j{j['id']}", "selectKey": f"j{j['id']}",
             "liveness": "live" if v["ready"] else "not_mounted",
             "fromDisplay": v["from"]["path"],
             "toDisplay": v["to"]["path"],
@@ -606,7 +663,8 @@ class ConnectionsController(QObject):
             "canSync": v["ready"],
             "scopeKind": "job", "scopeId": j["id"], "scopeId2": 0,
             "editKind": "job", "editId": j["id"],
-            "groupId": j["group_id"], "deviceId": j["to_device_id"],
+            "fromDeviceId": j["from_device_id"],
+            "toDeviceId": j["to_device_id"],
         }
 
     def _device_list_rows(self, ctx: dict) -> list[dict]:

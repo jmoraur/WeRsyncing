@@ -77,28 +77,42 @@ def main() -> int:
                          "host": "root@192.168.1.7"})
     office = db.add_device({"label": "Office server", "kind": "server",
                             "host": "jm@office.example"})
-    g_nas = db.add_group(label="NAS")
-    g_x10 = db.add_group(label="X10 Pro")
-    j_pic = db.add_job({"group_id": g_x10, "from_device_id": laptop,
+    j_pic = db.add_job({"from_device_id": laptop,
                         "from_path": str(laptop_dir), "to_device_id": drive,
                         "to_path": "Pictures", "opt_delete": 1})
-    db.add_job({"group_id": g_x10, "from_device_id": laptop,
+    db.add_job({"from_device_id": laptop,
                 "from_path": str(laptop_dir), "to_device_id": drive,
                 "to_path": "Pictures-copy", "path_mode": "folder"})
-    db.add_job({"group_id": g_nas, "from_device_id": laptop,
+    db.add_job({"from_device_id": laptop,
                 "from_path": str(laptop_dir), "to_device_id": nas,
                 "to_path": "/mnt/user/pictures", "chown_mode": "custom",
                 "chown_value": "nobody:users", "chmod_value": "D775,F664",
                 "opt_delete": 1})
-    j_pull = db.add_job({"group_id": g_nas, "name": "Appdata Backups",
+    j_pull = db.add_job({"name": "Appdata Backups",
                          "from_device_id": nas,
                          "from_path": "/mnt/user/backups_system/appdata",
                          "to_device_id": laptop,
                          "to_path": str(OUT / "laptop" / "Appdata Backups"),
                          "opt_delete": 1})
-    db.add_job({"group_id": g_nas, "from_device_id": laptop,
+    db.add_job({"from_device_id": laptop,
                 "from_path": str(laptop_dir), "to_device_id": office,
                 "to_path": "/srv/pictures"})
+    # Bundles: Documents (Family, Jan) and Videos > Plex (Movies).
+    j_fam = db.add_job({"name": "Family", "from_device_id": laptop,
+                        "from_path": str(laptop_dir), "to_device_id": nas,
+                        "to_path": "/mnt/user/docs/Family", "opt_delete": 1})
+    j_jan = db.add_job({"name": "Jan", "from_device_id": laptop,
+                        "from_path": str(laptop_dir), "to_device_id": nas,
+                        "to_path": "/mnt/user/docs/Jan", "opt_delete": 1})
+    j_mov = db.add_job({"name": "Movies", "from_device_id": laptop,
+                        "from_path": str(laptop_dir), "to_device_id": nas,
+                        "to_path": "/mnt/user/media/Plex/Movies"})
+    docs = db.add_bundle(label="Documents", from_device_id=laptop,
+                         to_device_id=nas, job_ids=[j_fam, j_jan])
+    plex = db.add_bundle(label="Plex", from_device_id=laptop,
+                         to_device_id=nas, job_ids=[j_mov])
+    db.add_bundle(label="Videos", from_device_id=laptop, to_device_id=nas,
+                  bundle_ids=[plex])
     imp = OUT / "import"
     (imp / "dump").mkdir(parents=True)
     (imp / "archive" / "2026").mkdir(parents=True)
@@ -169,17 +183,33 @@ def main() -> int:
     def add(label, action):
         steps.append((label, action))
 
-    add("01_page_groups", lambda: None)
+    add("01_page_destinations", lambda: None)
     add("01b_page_jobs_expanded", lambda: js(
         "page", f"o.toggleExpanded('j{j_pic}'); o.toggleExpanded('j{j_pull}')"))
     add("01c_page_sources", lambda: model.setProperty("viewMode", "source"))
     add("__", lambda: model.setProperty("viewMode", "group"))
+    # Selection + right-click menu: a bundleable pair, then a refused mix.
+    add("01d_selected", lambda: js(
+        "page", f"o.toggleExpanded('j{j_pic}'); o.toggleExpanded('j{j_pull}');"
+        f" o.select('j{j_fam}', 0); o.select('j{j_jan}', Qt.ControlModifier)"))
+    add("01e_menu", lambda: js("page", f"o.openMenu('j{j_jan}')"))
+    add("__", lambda: js("rowMenu", "o.close()"))
+    add("01f_menu_refused", lambda: js(
+        "page", f"o.select('j{j_pic}', Qt.ControlModifier);"
+        f" o.openMenu('j{j_pic}')"))
+    add("__", lambda: js("rowMenu", "o.close()"))
+    add("__", lambda: js("page", "o._selection = []"))
+    add("01g_menu_bundle", lambda: js("page", f"o.openMenu('b{plex}')"))
+    add("__", lambda: js("rowMenu", "o.close()"))
 
     for label, code, form in (
-            ("02_job_form_new", f"o.newJob({g_x10}, {drive})", "jobForm"),
+            ("02_job_form_new", f"o.newJob({laptop}, {drive})", "jobForm"),
             ("03_job_form_edit_pull", f"o.editEntity('job', {j_pull})",
              "jobForm"),
-            ("04_group_form", f"o.editEntity('group', {g_nas})", "groupForm"),
+            ("04_bundle_form_new", f"o.newBundle(['j{j_fam}'])",
+             "bundleForm"),
+            ("04b_bundle_form_rename", f"o.editEntity('bundle', {docs})",
+             "bundleForm"),
             ("05_device_form_drive", f"o.editEntity('device', {drive})",
              "deviceForm"),
             ("06_device_form_server", f"o.editEntity('device', {nas})",
@@ -187,8 +217,9 @@ def main() -> int:
         add(label, lambda code=code: js("page", code))
         add("__", lambda form=form: close(form))
 
-    add("07_delete_confirm_group", lambda: js(
-        "page", f"o.deleteEntity('group', {g_nas}, 'NAS')", "deleteConfirm"))
+    add("07_delete_confirm_device", lambda: js(
+        "page", f"o.deleteEntity('device', {office}, 'Office server')",
+        "deleteConfirm"))
     add("__", lambda: close("deleteConfirm"))
 
     # One job: job popup → options open → its --delete warning → Yes runs it.
@@ -199,11 +230,15 @@ def main() -> int:
     add("08c_sync_warning_popup", lambda: js(
         "syncConfirm", "o._optionsOpen = false; o.yes()", "syncConfirm"))
     add("__", lambda: js("syncConfirm", "o.yes()"))
-    # A whole group: the first popup lists the job that can't run;
-    # Yes to all on the job popup, then a warning popup still comes.
-    add("09_sync_group_popup", lambda: js(
-        "page", f"o.runSync('group', {g_nas}, 0)", "syncConfirm"))
-    add("09b_sync_group_warning", lambda: js(
+    # A bundle: its jobs at any depth.
+    add("09_sync_bundle_popup", lambda: js(
+        "page", f"o.runSync('bundle', {docs}, 0)", "syncConfirm"))
+    add("__", lambda: close("syncConfirm"))
+    # A whole source device: the first popup lists the job that can't
+    # run; Yes to all on the job popup, then a warning popup still comes.
+    add("09a_sync_source_popup", lambda: js(
+        "page", f"o.runSync('from', {laptop}, 0)", "syncConfirm"))
+    add("09b_sync_source_warning", lambda: js(
         "syncConfirm", "o.yesToAll()", "syncConfirm"))
     add("__", lambda: js("syncConfirm", "o.yesToAll()"))
     add("10_activity", lambda: None)

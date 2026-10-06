@@ -9,15 +9,18 @@ shows you the literal `rsync` command it is about to execute.
 
 ## What it does
 
-- **One page.** Jobs on the left (viewed by group or by source device),
+- **One page.** Jobs on the left (grouped by destination or by source
+  device),
   activity on the right: every run, and the selected run's live log.
 - **Devices.** This computer, drives (tracked by filesystem UUID and polled
   via `lsblk`) and servers over SSH (probed on their SSH port). Either side of
   a job can be any of them — laptop → drive, laptop → server, server →
   laptop, drive → laptop. Jobs whose device isn't there can't be started.
-- **Groups.** Plain labels that group jobs. Run one job, every job going to
-  one device in a group, a whole group, or everything from one source
-  (one writer per disk; different disks in parallel).
+- **Bundles.** Select jobs (click, Ctrl+click, Shift+click), right-click →
+  Bundle…; bundles can hold bundles. A bundle holds jobs of one source and
+  one destination device. Run one job, a bundle, everything between two
+  devices, or everything to / from one device (one writer per disk;
+  different disks in parallel).
 - **Confirm pop-ups.** "You are about to sync X." — then one pop-up per
   warning (e.g. `--delete` is on), with Cancel / No / Dry run / Yes /
   Yes to all. Errors (missing folder, unplugged drive) never run.

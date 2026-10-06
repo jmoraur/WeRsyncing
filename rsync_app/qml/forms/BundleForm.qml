@@ -3,20 +3,21 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../components"
 
-// Group dialog. A group is only a label that groups jobs. Reachable
-// from the group row's edit button and from inline-create in JobForm.
+// Bundle name dialog. New: bundles the selected jobs / bundles (`keys`,
+// "j<id>" / "b<id>") under the name. Rename: bundleId set.
 Dialog {
     id: dlg
     modal: true
     anchors.centerIn: Overlay.overlay
-    title: dlg.groupId === -1 ? "New group" : "Edit group"
+    title: dlg.bundleId === -1 ? "New bundle" : "Rename bundle"
     standardButtons: Dialog.Save | Dialog.Cancel
     width: 460
 
-    property int groupId: -1
+    property int bundleId: -1
+    property var keys: []
     property string initialLabel: ""
 
-    signal acceptedWithId(int newId)
+    signal done()
 
     onAboutToShow: {
         labelField.text = dlg.initialLabel
@@ -26,23 +27,20 @@ Dialog {
     onAccepted: {
         const label = labelField.text.trim()
         if (!label) return
-        let newId = dlg.groupId
-        if (dlg.groupId === -1) {
-            newId = connections.addGroup(label)
-        } else {
-            connections.updateGroup(dlg.groupId, label)
-        }
-        dlg.acceptedWithId(newId)
+        if (dlg.bundleId === -1) connections.bundle(dlg.keys, label)
+        else connections.renameBundle(dlg.bundleId, label)
+        dlg.done()
     }
 
     contentItem: ColumnLayout {
         spacing: Theme.s2
 
-        SectionLabel { text: "GROUP NAME" }
+        SectionLabel { text: "BUNDLE NAME" }
         TextField {
             id: labelField
             Layout.fillWidth: true
-            placeholderText: "e.g. NAS, X10 Pro"
+            placeholderText: "e.g. Documents, Videos"
+            onAccepted: dlg.accept()
         }
 
         Label {
@@ -50,8 +48,8 @@ Dialog {
             wrapMode: Text.Wrap
             opacity: 0.55
             font.pixelSize: Theme.fsSmall
-            text: "A group only groups jobs in the list. " +
-                  "\"Sync all\" on a group runs every job in it."
+            text: "A bundle only gathers jobs in the list. Its sync button " +
+                  "runs every job inside it, bundles inside it included."
         }
     }
 }

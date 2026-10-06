@@ -108,7 +108,7 @@ ThemedWindow {
         // The whole saved job, so the run is exactly what the job says.
         const b = connections.getJob(_jobs[_jobIdx].id)
         const d = {
-            group_id: 0, name: "",
+            name: "",
             from_device_id: 0, from_path: "",
             to_device_id: 0, to_path: "",
             path_mode: "contents", chown_mode: "source",
