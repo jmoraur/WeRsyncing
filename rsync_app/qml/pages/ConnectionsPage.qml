@@ -6,41 +6,43 @@ import QtQuick.Layouts
 import "../components"
 import "../forms"
 
+// The one page: jobs on the left, activity (runs + log) on the right.
 Item {
     id: page
     objectName: "page"
 
-    // Persisted via Settings below. Drives OutputPanel SplitView height.
-    property int _outputHeight: 280
-
-    // Gates the OutputPanel's onHeightChanged writeback. During the first
-    // ~500ms the SplitView briefly sizes the panel to its minimumHeight
-    // (120) while the parent fills — without this gate, that transient
-    // value gets persisted and the user's real drag is lost.
-    property bool _heightCaptureReady: false
+    // Width of the jobs pane, persisted. The SplitView briefly lays the
+    // pane out at its minimum while the window fills; only save widths
+    // after that settles, or the user's width is lost.
+    property int _jobsWidth: 520
+    property bool _widthReady: false
+    Timer { interval: 500; running: true; onTriggered: page._widthReady = true }
+    // Job details open/closed: "|"-joined jobKeys ("j12", "i3"). Jobs are
+    // folded by default, so this stores the open ones.
+    property string _expandedJobs: ""
+    readonly property var _expanded: {
+        const out = {}
+        for (const k of _expandedJobs.split("|")) if (k) out[k] = true
+        return out
+    }
 
     // viewMode can't be aliased — connectionsModel is a context property
     // (no QML id). Push on startup; capture changes via Connections.
     Settings {
         id: uiSettings
         category: "ui"
-        property string viewMode: "destination"
+        property string viewMode: "group"
         property string collapsedKeys: ""
-        property alias outputCollapsed: outputPanel.collapsed
-        property alias outputHeight: page._outputHeight
+        property alias expandedJobs: page._expandedJobs
+        property alias jobsWidth: page._jobsWidth
         property alias outputFilter: outputPanel._filter
     }
 
     Component.onCompleted: {
-        connectionsModel.viewMode = uiSettings.viewMode
+        // Views were "destination"/"source" before 0.10.
+        connectionsModel.viewMode = uiSettings.viewMode === "source"
+                                    ? "source" : "group"
         connectionsModel.collapsedKeys = uiSettings.collapsedKeys
-        heightReadyTimer.start()
-    }
-
-    Timer {
-        id: heightReadyTimer
-        interval: 500
-        onTriggered: page._heightCaptureReady = true
     }
 
     Connections {
@@ -53,72 +55,32 @@ Item {
         }
     }
 
-    // ---- Form routing ------------------------------------------------
-    // Page-level dispatch: a `+ new` / `edit` click on a row routes to
-    // the right form with the right prefills. `del` opens the cascade-
-    // aware confirm dialog which calls the controller on Yes.
+    // ---- Routing ------------------------------------------------------
 
-    function newConnection(prefillDeviceId) {
-        connectionForm.bindingId = -1
-        connectionForm.initialSourceId = -1
-        connectionForm.initialDeviceId = prefillDeviceId !== undefined
-                                        ? prefillDeviceId : -1
-        connectionForm.open()
+    function toggleExpanded(key) {
+        const keys = _expandedJobs.split("|").filter(k => k)
+        const i = keys.indexOf(key)
+        if (i >= 0) keys.splice(i, 1)
+        else keys.push(key)
+        _expandedJobs = keys.join("|")
     }
 
-    function newDevice(prefillContainerId) {
+    function newJob(groupId, toDeviceId) {
+        jobForm.jobId = -1
+        jobForm.initialGroupId = groupId
+        jobForm.initialToDeviceId = toDeviceId
+        jobForm.open()
+    }
+
+    function newGroup() {
+        groupForm.groupId = -1
+        groupForm.initialLabel = ""
+        groupForm.open()
+    }
+
+    function newDevice() {
         deviceForm.deviceId = -1
-        deviceForm.initialContainerId = prefillContainerId !== undefined
-                                       ? prefillContainerId : -1
-        deviceForm.initialKind = "local"
-        deviceForm.initialLabel = ""
-        deviceForm.initialUuid = ""
-        deviceForm.initialNetworkTarget = ""
-        deviceForm.initialRsh = ""
         deviceForm.open()
-    }
-
-    function editEntity(rowType, nodeId) {
-        if (rowType === "source") {
-            const row = connections.getSourceLabel(nodeId)
-            if (!row.id) return
-            sourceLabelForm.sourceLabelId = nodeId
-            sourceLabelForm.initialLabel = row.label || ""
-            sourceLabelForm.initialPath = row.path || ""
-            sourceLabelForm.open()
-        } else if (rowType === "container") {
-            const row = connections.getDestContainer(nodeId)
-            if (!row.id) return
-            containerForm.containerId = nodeId
-            containerForm.initialLabel = row.label || ""
-            containerForm.open()
-        } else if (rowType === "device") {
-            const row = connections.getDestDevice(nodeId)
-            if (!row.id) return
-            deviceForm.deviceId = nodeId
-            deviceForm.initialContainerId = row.container_id || -1
-            deviceForm.initialKind = row.kind || "local"
-            deviceForm.initialLabel = row.label || ""
-            deviceForm.initialUuid = row.uuid || ""
-            deviceForm.initialNetworkTarget = row.network_target || ""
-            deviceForm.initialRsh = row.rsh || ""
-            deviceForm.open()
-        } else if (rowType === "connection") {
-            connectionForm.bindingId = nodeId
-            connectionForm.initialSourceId = -1
-            connectionForm.initialDeviceId = -1
-            connectionForm.open()
-        } else if (rowType === "importJob") {
-            const row = connections.getImportJob(nodeId)
-            if (!row.id) return
-            importJobForm.importJobId = nodeId
-            importJobForm.initialLabel = row.label || ""
-            importJobForm.initialDump = row.dump_path || ""
-            importJobForm.initialDest = row.dest_path || ""
-            importJobForm.initialArchive = row.archive_root || ""
-            importJobForm.initialCopyMode = row.copy_mode || 0
-            importJobForm.open()
-        }
     }
 
     function newImportJob() {
@@ -131,207 +93,194 @@ Item {
         importJobForm.open()
     }
 
-    function deleteEntity(rowType, nodeId, label) {
-        deleteConfirm.rowType = rowType
-        deleteConfirm.nodeId = nodeId
+    function editEntity(kind, id) {
+        if (kind === "group") {
+            groupForm.groupId = id
+            groupForm.initialLabel = connections.getGroup(id).label || ""
+            groupForm.open()
+        } else if (kind === "device") {
+            deviceForm.deviceId = id
+            deviceForm.open()
+        } else if (kind === "job") {
+            jobForm.jobId = id
+            jobForm.open()
+        } else if (kind === "importJob") {
+            const row = connections.getImportJob(id)
+            if (!row.id) return
+            importJobForm.importJobId = id
+            importJobForm.initialLabel = row.label || ""
+            importJobForm.initialDump = row.dump_path || ""
+            importJobForm.initialDest = row.dest_path || ""
+            importJobForm.initialArchive = row.archive_root || ""
+            importJobForm.initialCopyMode = row.copy_mode || 0
+            importJobForm.open()
+        }
+    }
+
+    function deleteEntity(kind, id, label) {
+        deleteConfirm.kind = kind
+        deleteConfirm.itemId = id
         deleteConfirm.label = label
         deleteConfirm.open()
     }
 
-    function runSync(scopeKind, scopeId) {
-        if (scopeKind === "import") {
-            importConfirmDialog.openFor(scopeId)
-            return
-        }
-        syncConfirmDialog.openFor(scopeKind, scopeId)
+    function runSync(kind, id, id2) {
+        if (kind === "import") importConfirm.openFor(id)
+        else syncConfirm.openFor(kind, id, id2)
     }
 
-    // Vertical SplitView: connection tree on top, sync output panel
-    // on bottom. When the panel is collapsed it locks to header-only
-    // height; otherwise the user can drag the divider.
-    SplitView {
+    ColumnLayout {
         anchors.fill: parent
         anchors.margins: Theme.s3
-        orientation: Qt.Vertical
+        spacing: Theme.s3
 
-        Item {
-            SplitView.fillHeight: true
-            SplitView.minimumHeight: 200
+        // ---- Toolbar --------------------------------------------------
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Theme.s3
 
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: Theme.s3
+            Wordmark { Layout.rightMargin: Theme.s3 }
 
-                // Toolbar row.
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: Theme.s3
+            Button {
+                text: "New"
+                icon.name: "list-add"
+                icon.color: Theme.textColor
+                highlighted: true
+                onClicked: newMenu.open()
 
-                    Wordmark {
-                        Layout.rightMargin: Theme.s3
-                    }
+                Menu {
+                    id: newMenu
+                    y: parent.height
+                    MenuItem { text: "Job…"; onTriggered: page.newJob(-1, -1) }
+                    MenuItem { text: "Group…"; onTriggered: page.newGroup() }
+                    MenuItem { text: "Device…"; onTriggered: page.newDevice() }
+                    MenuSeparator {}
+                    MenuItem { text: "Import…"; onTriggered: page.newImportJob() }
+                }
+            }
 
-                    Button {
-                        text: "New connection"
-                        icon.name: "list-add"
-                        // Recolor: theme icons come from the session's icon
-                        // theme, which may not match a forced light/dark mode.
-                        icon.color: Theme.textColor
-                        highlighted: true
-                        onClicked: page.newConnection(-1)
-                    }
+            Item { Layout.fillWidth: true }
 
-                    Button {
-                        text: "New import"
-                        icon.name: "document-import"
-                        icon.color: Theme.textColor
-                        onClicked: page.newImportJob()
-                    }
+            Label {
+                text: "View"
+                opacity: 0.6
+            }
+            SegmentedControl {
+                model: [
+                    {value: "group", label: "Groups"},
+                    {value: "source", label: "Sources"},
+                ]
+                value: connectionsModel.viewMode
+                onActivated: v => connectionsModel.viewMode = v
+            }
 
-                    Item { Layout.fillWidth: true }
+            ToolButton {
+                icon.name: "contrast"
+                icon.color: Theme.textColor
+                onClicked: themeMenu.open()
 
-                    Label {
-                        text: "Group by"
-                        opacity: 0.6
-                    }
+                Menu {
+                    id: themeMenu
+                    objectName: "themeMenu"
+                    y: parent.height
 
-                    SegmentedControl {
+                    Repeater {
                         model: [
-                            {value: "destination", label: "Destination"},
-                            {value: "source", label: "Source"},
+                            {value: "system", label: "System"},
+                            {value: "light", label: "Light"},
+                            {value: "dark", label: "Dark"},
                         ]
-                        value: connectionsModel.viewMode
-                        onActivated: v => connectionsModel.viewMode = v
-                    }
-
-                    ToolButton {
-                        icon.name: "contrast"
-                        icon.color: Theme.textColor
-                        onClicked: themeMenu.open()
-
-                        Menu {
-                            id: themeMenu
-                            objectName: "themeMenu"
-                            y: parent.height
-
-                            Repeater {
-                                model: [
-                                    {value: "system", label: "System"},
-                                    {value: "light", label: "Light"},
-                                    {value: "dark", label: "Dark"},
-                                ]
-                                MenuItem {
-                                    required property var modelData
-                                    text: modelData.label
-                                    checkable: true
-                                    checked: themeBridge.mode === modelData.value
-                                    onTriggered: themeBridge.setMode(modelData.value)
-                                }
-                            }
+                        MenuItem {
+                            required property var modelData
+                            text: modelData.label
+                            checkable: true
+                            checked: themeBridge.mode === modelData.value
+                            onTriggered: themeBridge.setMode(modelData.value)
                         }
                     }
                 }
+            }
+        }
 
-                // The tree itself.
-                ScrollView {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
+        // ---- Jobs | Activity ------------------------------------------
+        SplitView {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            orientation: Qt.Horizontal
+
+            // Wide, easy-to-catch grip with a visible line.
+            handle: Item {
+                implicitWidth: 12
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: parent.SplitHandle.hovered
+                           || parent.SplitHandle.pressed ? 4 : 2
+                    height: parent.height - 2 * Theme.s3
+                    radius: 2
+                    color: parent.SplitHandle.pressed ? Theme.accent
+                         : parent.SplitHandle.hovered
+                           ? Theme.tint(Theme.accent, 0.7)
+                         : Theme.border
+                }
+            }
+
+            Item {
+                SplitView.preferredWidth: page._jobsWidth
+                SplitView.minimumWidth: 320
+                onWidthChanged: if (page._widthReady) page._jobsWidth = width
+
+                ListView {
+                    id: tree
+                    anchors.fill: parent
+                    model: connectionsModel
+                    spacing: 2
                     clip: true
+                    ScrollBar.vertical: ScrollBar {}
 
-                    ListView {
-                        id: tree
-                        model: connectionsModel
-                        spacing: 2
-                        interactive: true
-
-                        delegate: TreeRow {
-                            width: tree.width
-                            onSyncRequested: (scopeKind, scopeId) =>
-                                page.runSync(scopeKind, scopeId)
-                            onEditRequested: (rowType, nodeId) =>
-                                page.editEntity(rowType, nodeId)
-                            onDeleteRequested: (rowType, nodeId, lbl) =>
-                                page.deleteEntity(rowType, nodeId, lbl)
-                            onAddConnectionRequested: deviceId =>
-                                page.newConnection(deviceId)
-                            onAddDeviceRequested: containerId =>
-                                page.newDevice(containerId)
-                            onToggleRequested: key =>
-                                connectionsModel.toggleCollapsed(key)
-                            onMoveRequested: (containerId, delta) =>
-                                connections.moveDestContainer(containerId,
-                                                              delta)
-                        }
-                    }
-                }
-
-                // Empty state. Shown only when the model has no rows.
-                ColumnLayout {
-                    visible: tree.count === 0
-                    Layout.alignment: Qt.AlignHCenter
-                    spacing: Theme.s2
-
-                    Label {
-                        Layout.alignment: Qt.AlignHCenter
-                        text: "Nothing here yet"
-                        font.weight: Font.DemiBold
-                        font.pixelSize: Theme.fsHeading
-                        opacity: 0.7
-                    }
-                    Label {
-                        Layout.alignment: Qt.AlignHCenter
-                        text: "A connection pairs a source folder with a destination device."
-                        opacity: 0.5
-                    }
-                    Button {
-                        Layout.alignment: Qt.AlignHCenter
-                        Layout.bottomMargin: Theme.s4
-                        text: "Create your first connection"
-                        icon.name: "list-add"
-                        icon.color: Theme.textColor
-                        onClicked: page.newConnection(-1)
+                    delegate: TreeRow {
+                        width: tree.width - Theme.s2
+                        expanded: !!page._expanded[jobKey]
+                        onSyncRequested: (k, i, i2) => page.runSync(k, i, i2)
+                        onEditRequested: (k, i) => page.editEntity(k, i)
+                        onDeleteRequested: (k, i, l) => page.deleteEntity(k, i, l)
+                        onNewJobRequested: (g, d) => page.newJob(g, d)
+                        onNewDeviceRequested: page.newDevice()
+                        onNewImportRequested: page.newImportJob()
+                        onToggleRequested: key =>
+                            connectionsModel.toggleCollapsed(key)
+                        onExpandRequested: key => page.toggleExpanded(key)
+                        onMoveRequested: (g, delta) =>
+                            connections.moveGroup(g, delta)
                     }
                 }
             }
-        }
 
-        OutputPanel {
-            id: outputPanel
-            // SplitView doesn't treat -1 as "no maximum" — it clamps
-            // to that literal value. Use a large number instead.
-            SplitView.preferredHeight: collapsed ? headerHeight : page._outputHeight
-            SplitView.minimumHeight: collapsed ? headerHeight : 120
-            SplitView.maximumHeight: collapsed ? headerHeight : 99999
-            onHeightChanged: {
-                if (page._heightCaptureReady && !collapsed) {
-                    page._outputHeight = height
-                }
+            OutputPanel {
+                id: outputPanel
+                objectName: "outputPanel"
+                SplitView.fillWidth: true
+                SplitView.minimumWidth: 320
             }
         }
     }
 
-    // ---- Form dialogs (instantiated once, reused) --------------------
+    // ---- Forms (instantiated once, reused) ----------------------------
 
-    SourceLabelForm   { id: sourceLabelForm; objectName: "sourceLabelForm" }
-    ContainerForm     { id: containerForm; objectName: "containerForm" }
-    DeviceForm        { id: deviceForm; objectName: "deviceForm" }
-    ConnectionForm    { id: connectionForm; objectName: "connectionForm" }
-    SyncConfirmDialog { id: syncConfirmDialog; objectName: "syncConfirmDialog" }
-    ImportJobForm     { id: importJobForm; objectName: "importJobForm" }
-    ImportConfirmDialog {
-        id: importConfirmDialog
-        objectName: "importConfirmDialog"
-    }
+    GroupForm       { id: groupForm; objectName: "groupForm" }
+    DeviceForm      { id: deviceForm; objectName: "deviceForm" }
+    JobForm         { id: jobForm; objectName: "jobForm" }
+    ImportJobForm   { id: importJobForm; objectName: "importJobForm" }
 
-    DeleteConfirmDialog {
+    SyncConfirmWindow { id: syncConfirm; objectName: "syncConfirm" }
+    ImportConfirmWindow { id: importConfirm; objectName: "importConfirm" }
+    DeleteConfirmWindow {
         id: deleteConfirm
         objectName: "deleteConfirm"
-        onConfirmed: function(rowType, nodeId) {
-            if (rowType === "source")         connections.deleteSourceLabel(nodeId)
-            else if (rowType === "container") connections.deleteDestContainer(nodeId)
-            else if (rowType === "device")    connections.deleteDestDevice(nodeId)
-            else if (rowType === "connection") connections.deleteBinding(nodeId)
-            else if (rowType === "importJob") connections.deleteImportJob(nodeId)
+        onConfirmed: (kind, id) => {
+            if (kind === "group")          connections.deleteGroup(id)
+            else if (kind === "device")    connections.deleteDevice(id)
+            else if (kind === "job")       connections.deleteJob(id)
+            else if (kind === "importJob") connections.deleteImportJob(id)
         }
     }
 }

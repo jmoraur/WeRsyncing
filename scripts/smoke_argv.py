@@ -2,14 +2,13 @@
 
 Pure Python, no Qt. Run with: PYTHONPATH=. python scripts/smoke_argv.py
 Covers the three ownership modes (x values present/partial/absent),
-local/remote destinations, and device-level rsh.
+local/server endpoints on either side, and device-level rsh.
 """
 from rsync_app.rsync import build_rsync_argv
 
-SRC = {"kind": "local", "base": "/home/user/Pictures", "subpath": ""}
-DEST_LOCAL = {"kind": "local", "base": "/mnt/backup", "subpath": "photos"}
-DEST_REMOTE = {"kind": "remote", "base": "root@10.0.0.5:/mnt/user",
-               "subpath": "media", "rsh": "ssh -p 2222"}
+SRC = {"path": "/home/user/Pictures", "rsh": ""}
+DEST_LOCAL = {"path": "/mnt/backup/photos", "rsh": ""}
+DEST_REMOTE = {"path": "root@10.0.0.5:/mnt/user/media", "rsh": "ssh -p 2222"}
 
 BASE = {
     "path_mode": "contents",
@@ -23,9 +22,9 @@ BASE = {
 DEST_RECIPE = ["--no-owner", "--no-group", "--no-perms", "--chmod=ugo=rwX"]
 
 
-def argv(row_extra=None, dest=DEST_LOCAL, overrides=None):
+def argv(row_extra=None, dest=DEST_LOCAL, overrides=None, src=SRC):
     row = {**BASE, **(row_extra or {})}
-    return build_rsync_argv(row, SRC, dest, overrides)
+    return build_rsync_argv(row, src, dest, overrides)
 
 
 def check(label, condition):
@@ -98,17 +97,16 @@ a = argv({"path_mode": "folder"}, dest=DEST_REMOTE)
 check("folder mode, remote dest path composed without trailing slash",
       a[-1] == "root@10.0.0.5:/mnt/user/media")
 
-# --- direction: pull swaps the two paths, nothing else ----------------------
-push = argv(dest=DEST_REMOTE)
-pull = argv({"direction": "pull"}, dest=DEST_REMOTE)
-check("pull puts the device path first, laptop path last",
+# --- from/to: the order is exactly what the job says -----------------------
+pull = argv(src=DEST_REMOTE, dest=SRC)
+check("server → laptop puts the server path first",
       pull[-2:] == ["root@10.0.0.5:/mnt/user/media/", "/home/user/Pictures/"])
-check("pull keeps every flag (incl. --rsh) identical to push",
-      pull[:-2] == argv(dest=DEST_REMOTE)[:-2])
-check("missing direction key means push",
-      push[-1] == "root@10.0.0.5:/mnt/user/media/")
-a = argv({"direction": "pull", "path_mode": "folder"}, dest=DEST_LOCAL)
-check("pull from a local drive, folder mode",
+check("server as the source still emits its --rsh",
+      "--rsh=ssh -p 2222" in pull)
+a = argv({"path_mode": "folder"}, src=DEST_LOCAL, dest=SRC)
+check("drive → laptop, folder mode",
       a[-2:] == ["/mnt/backup/photos", "/home/user/Pictures"])
+a = argv(src={"path": "/", "rsh": ""})
+check("root folder stays '/' in contents mode", a[-2] == "/")
 
 print("smoke_argv: all checks passed")

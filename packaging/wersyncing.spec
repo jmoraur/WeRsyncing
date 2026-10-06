@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.9.0
+Version:        0.10.0
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,17 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.10.0-1
+- A job is plain rsync: from (device + folder) -> to (device + folder)
+  + options; groups only group jobs. Devices: this computer, drives,
+  servers. The old push/pull switch is gone (it let a single-job run go
+  the wrong way). Existing data is converted once, with a backup
+  (rsync.db.pre-jobs.bak); every job's command stays the same
+- New layout: jobs and activity side by side, sync buttons on the left,
+  jobs folded to one line, run list + full-height log
+- Confirmations are pop-up windows: one per job and one per warning,
+  with Cancel / No / Dry run / Yes / Yes to all
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.9.0-1
 - Groups, devices, sources and the Imports section fold open/closed
   (arrow or click on the name); the folded state is remembered

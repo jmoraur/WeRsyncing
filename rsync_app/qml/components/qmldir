@@ -13,3 +13,4 @@ ScrollComboBox 1.0 ScrollComboBox.qml
 TreeRow 1.0 TreeRow.qml
 Wordmark 1.0 Wordmark.qml
 OutputPanel 1.0 OutputPanel.qml
+ThemedWindow 1.0 ThemedWindow.qml

@@ -1,17 +1,13 @@
 """Sync runner: queues rsync jobs and runs them via QProcess.
 
-Jobs are grouped by `destDeviceId` — one rsync at a time per device
-(don't want two writers on the same disk), but separate devices run
-in parallel. That matches the M3-redux scope rules:
-
-- connection scope: 1 job → 1 device → sequential trivially.
-- device scope: N jobs, all same device → sequential within.
-- container / source scope: N jobs across K devices → K in parallel,
-  sequential within each.
+Jobs are grouped by `destDeviceId` (the device a job writes to) — one
+rsync at a time per device (don't want two writers on the same disk), but
+separate devices run in parallel.
 
 QML interop:
 
-- `enqueue(jobs)` takes a JS array of `{argv, label, destDeviceId}`.
+- `enqueue(jobs)` takes a JS array of `{argv, label, destDeviceId, jobId}`
+  (`jobId` = the saved job, handed to the pre-start check).
 - `jobs()` returns a snapshot (no log payload — fetched on demand via
   `jobLog(id)` so we don't shovel the whole buffer through QVariant on
   every state change).
@@ -43,6 +39,7 @@ class _Job:
         "argv",
         "label",
         "dest_device_id",
+        "job_ref",
         "state",
         "log",
         "exit_code",
@@ -65,6 +62,7 @@ class _Job:
         self.argv = list(argv)
         self.label = label
         self.dest_device_id = dest_device_id
+        self.job_ref = 0          # saved job id, for the pre-start check
         self.state = "pending"
         self.log = ""
         self.exit_code: Optional[int] = None
@@ -122,6 +120,7 @@ class SyncRunner(QObject):
             label = str(spec.get("label") or "")
             device_id = int(spec.get("destDeviceId") or 0)
             job = _Job(self._next_id, argv, label, device_id)
+            job.job_ref = int(spec.get("jobId") or 0)
             self._next_id += 1
             self._all[job.id] = job
             self._order.append(job.id)
@@ -235,7 +234,7 @@ class SyncRunner(QObject):
                 job_id = queue.pop(0)
                 job = self._all[job_id]
                 err = (
-                    self._pre_start_check(job.dest_device_id, job.argv)
+                    self._pre_start_check(job.job_ref, job.argv)
                     if self._pre_start_check is not None
                     and job.kind == "process" else None
                 )

@@ -1,3 +1,4 @@
+import os.path
 import shutil
 import sqlite3
 from pathlib import Path
@@ -8,25 +9,27 @@ from rsync_app.rsync import OPTIONS
 
 _UNSET = object()
 
-_BASELINE_OPT_COLS = tuple(o["key"] for o in OPTIONS if o["baseline"])
-
 _BOOL_COLS = frozenset(o["key"] for o in OPTIONS)
 
-# Complete defaults for a binding row minus the two FK columns.
-# Option defaults come straight from the rsync catalog.
-BINDING_DEFAULTS = {
-    "dest_subpath": "",
+# A job is rsync: from (device + path) → to (device + path) + options.
+# Defaults for everything but the group and the two devices; option
+# defaults come straight from the rsync catalog.
+JOB_DEFAULTS = {
+    "name": "",
+    "from_path": "",
+    "to_path": "",
     "path_mode": "contents",
     "chown_mode": "source",
     "chown_value": None,
     "chmod_value": None,
     **{o["key"]: int(o["default"]) for o in OPTIONS},
     "excludes": None,
-    "direction": "push",
 }
 
-# Every writable bindings column, in schema order.
-BINDING_COLS = ("source_label_id", "dest_device_id", *BINDING_DEFAULTS)
+# Every writable jobs column.
+JOB_COLS = ("group_id", "from_device_id", "to_device_id", *JOB_DEFAULTS)
+
+DEVICE_COLS = ("label", "kind", "uuid", "host", "rsh")
 
 _OPT_COLS_SQL = ",\n    ".join(
     f"{o['key']} INTEGER NOT NULL DEFAULT {int(o['default'])} "
@@ -34,65 +37,47 @@ _OPT_COLS_SQL = ",\n    ".join(
     for o in OPTIONS
 )
 
-
-def _bindings_ddl(name: str, if_not_exists: bool = False) -> str:
-    """The bindings table DDL, shared by SCHEMA and the rebuild migration so
-    a rebuilt table is guaranteed identical to a freshly created one."""
-    ine = "IF NOT EXISTS " if if_not_exists else ""
-    return f"""
-CREATE TABLE {ine}{name} (
-    id               INTEGER PRIMARY KEY,
-    source_label_id  INTEGER NOT NULL
-                     REFERENCES source_labels(id) ON DELETE CASCADE,
-    dest_device_id   INTEGER NOT NULL
-                     REFERENCES dest_devices(id) ON DELETE CASCADE,
-    dest_subpath     TEXT NOT NULL DEFAULT '',
-    path_mode        TEXT NOT NULL DEFAULT 'contents'
-                     CHECK (path_mode IN ('contents', 'folder')),
-    chown_mode       TEXT NOT NULL DEFAULT 'source'
-                     CHECK (chown_mode IN ('source', 'dest', 'custom')),
-    chown_value      TEXT,
-    chmod_value      TEXT,
-    {_OPT_COLS_SQL},
-    excludes         TEXT,
-    direction        TEXT NOT NULL DEFAULT 'push'
-                     CHECK (direction IN ('push', 'pull')),
-    UNIQUE (source_label_id, dest_device_id, dest_subpath)
-);
-"""
-
-
+# Devices are places folders live: the laptop itself, a drive (found by
+# filesystem UUID, path relative to its mountpoint) or a server reached
+# over ssh (`host` = "user@host", path absolute on the server).
 SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS source_labels (
-    id    INTEGER PRIMARY KEY,
-    label TEXT NOT NULL,
-    path  TEXT NOT NULL UNIQUE
-);
-
-CREATE TABLE IF NOT EXISTS dest_containers (
+CREATE TABLE IF NOT EXISTS groups (
     id       INTEGER PRIMARY KEY,
     label    TEXT NOT NULL,
     position INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE IF NOT EXISTS dest_devices (
-    id              INTEGER PRIMARY KEY,
-    container_id    INTEGER NOT NULL
-                    REFERENCES dest_containers(id) ON DELETE CASCADE,
-    label           TEXT NOT NULL,
-    kind            TEXT NOT NULL DEFAULT 'local'
-                    CHECK (kind IN ('local', 'remote')),
-    uuid            TEXT,
-    network_target  TEXT,
-    rsh             TEXT,
+CREATE TABLE IF NOT EXISTS devices (
+    id     INTEGER PRIMARY KEY,
+    label  TEXT NOT NULL,
+    kind   TEXT NOT NULL CHECK (kind IN ('laptop', 'drive', 'server')),
+    uuid   TEXT UNIQUE,
+    host   TEXT,
+    rsh    TEXT,
     CHECK (
-        (kind = 'local'  AND uuid IS NOT NULL AND network_target IS NULL) OR
-        (kind = 'remote' AND network_target IS NOT NULL AND uuid IS NULL)
-    ),
-    UNIQUE (uuid)
+        (kind = 'laptop' AND uuid IS NULL AND host IS NULL) OR
+        (kind = 'drive'  AND uuid IS NOT NULL AND host IS NULL) OR
+        (kind = 'server' AND host IS NOT NULL AND uuid IS NULL)
+    )
 );
 
-{_bindings_ddl("bindings", if_not_exists=True)}
+CREATE TABLE IF NOT EXISTS jobs (
+    id              INTEGER PRIMARY KEY,
+    group_id        INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL DEFAULT '',
+    from_device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    from_path       TEXT NOT NULL DEFAULT '',
+    to_device_id    INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    to_path         TEXT NOT NULL DEFAULT '',
+    path_mode       TEXT NOT NULL DEFAULT 'contents'
+                    CHECK (path_mode IN ('contents', 'folder')),
+    chown_mode      TEXT NOT NULL DEFAULT 'source'
+                    CHECK (chown_mode IN ('source', 'dest', 'custom')),
+    chown_value     TEXT,
+    chmod_value     TEXT,
+    {_OPT_COLS_SQL},
+    excludes        TEXT
+);
 
 CREATE TABLE IF NOT EXISTS import_jobs (
     id           INTEGER PRIMARY KEY,
@@ -117,6 +102,17 @@ def _coerce(col: str, value):
     return value
 
 
+def _split_target(target: str) -> tuple[str, str]:
+    """'root@nas:/mnt/user' -> ('root@nas', '/mnt/user')."""
+    host, _, path = (target or "").partition(":")
+    return host, path or "/"
+
+
+def _join(base: str, sub: str) -> str:
+    base, sub = (base or "").rstrip("/"), (sub or "").strip("/")
+    return f"{base}/{sub}" if sub else (base or "/")
+
+
 class Database(QObject):
     db_changed = Signal()
 
@@ -126,43 +122,21 @@ class Database(QObject):
         self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        old = self._has_table("bindings")
         self._conn.executescript(SCHEMA)
-        self._migrate_baseline_opts()
-        self._migrate_direction()
-        self._migrate_source_unique()
-        self._migrate_options_ux()
         self._migrate_import_copy_mode()
-        self._migrate_container_position()
+        if old:
+            self._migrate_to_jobs()
+        if not self._conn.execute(
+                "SELECT 1 FROM devices WHERE kind = 'laptop'").fetchone():
+            self._conn.execute(
+                "INSERT INTO devices(label, kind) VALUES ('Laptop', 'laptop')")
         self._conn.commit()
 
-    def _migrate_baseline_opts(self) -> None:
-        """Add the baseline-option columns to a pre-existing bindings table.
-
-        `CREATE TABLE IF NOT EXISTS` won't touch an existing table, so a DB
-        created before baseline options became editable lacks these columns.
-        Add them DEFAULT 1, which makes existing bindings keep emitting the
-        baseline flags exactly as before.
-        """
-        have = {row["name"] for row in
-                self._conn.execute("PRAGMA table_info(bindings)")}
-        for col in _BASELINE_OPT_COLS:
-            if col not in have:
-                self._conn.execute(
-                    f"ALTER TABLE bindings ADD COLUMN {col} "
-                    f"INTEGER NOT NULL DEFAULT 1 CHECK ({col} IN (0, 1))"
-                )
-
-    def _migrate_direction(self) -> None:
-        """Add direction to a pre-existing bindings table ('push' = the
-        original laptop → device behavior). Runs before _migrate_options_ux
-        so that rebuild's SELECT finds every BINDING_COLS column."""
-        have = {row["name"] for row in
-                self._conn.execute("PRAGMA table_info(bindings)")}
-        if "direction" not in have:
-            self._conn.execute(
-                "ALTER TABLE bindings ADD COLUMN direction TEXT NOT NULL "
-                "DEFAULT 'push' CHECK (direction IN ('push', 'pull'))"
-            )
+    def _has_table(self, name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,)).fetchone() is not None
 
     def _migrate_import_copy_mode(self) -> None:
         """Add copy_mode to a pre-existing import_jobs table (0 = the
@@ -175,285 +149,188 @@ class Database(QObject):
                 "INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))"
             )
 
-    def _migrate_container_position(self) -> None:
-        """Add dest_containers.position (user-set group order). All 0 at
-        first, so the list keeps its old by-label order until a move."""
-        have = {row["name"] for row in
-                self._conn.execute("PRAGMA table_info(dest_containers)")}
-        if "position" not in have:
-            self._conn.execute(
-                "ALTER TABLE dest_containers ADD COLUMN position "
-                "INTEGER NOT NULL DEFAULT 0"
-            )
-
-    def _migrate_source_unique(self) -> None:
-        """Move the UNIQUE constraint on source_labels from label to path.
-
-        The source label became a non-unique *group* name (e.g. "Laptop");
-        the folder shown next to it is derived from the path, so the path is
-        what must be unique now ("one folder = one source"). A DB created
-        under the old UNIQUE(label) schema is rebuilt in place, preserving
-        ids and rows. Fresh DBs already match and are skipped.
-        """
-        unique_cols = set()
-        for idx in self._conn.execute("PRAGMA index_list(source_labels)"):
-            if idx["unique"]:
-                info = self._conn.execute(
-                    f"PRAGMA index_info('{idx['name']}')"
-                ).fetchall()
-                if len(info) == 1:
-                    unique_cols.add(info[0]["name"])
-        if unique_cols == {"path"}:
-            return  # already the new shape
-
-        # FK must be OFF to drop the referenced table without cascading into
-        # bindings; the rename keeps the same table name so the FK stays valid.
+    def _migrate_to_jobs(self) -> None:
+        """One-time conversion of the pre-0.10 model (source_labels /
+        dest_containers / dest_devices / bindings with a push/pull swap)
+        into groups / devices / jobs where every job states its real
+        from and to. Ids of groups and jobs are kept. Expects the 0.9 shape
+        (older DBs: run 0.9 once first). Writes rsync.db.pre-jobs.bak."""
+        backup = self.path.with_name(self.path.name + ".pre-jobs.bak")
         self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = OFF")
-        self._conn.executescript(
-            """
-            CREATE TABLE source_labels_new (
-                id    INTEGER PRIMARY KEY,
-                label TEXT NOT NULL,
-                path  TEXT NOT NULL UNIQUE
-            );
-            INSERT OR IGNORE INTO source_labels_new (id, label, path)
-                SELECT id, label, path FROM source_labels;
-            DROP TABLE source_labels;
-            ALTER TABLE source_labels_new RENAME TO source_labels;
-            """
-        )
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = ON")
-
-    def _migrate_options_ux(self) -> None:
-        """Move rsh from bindings to dest_devices and widen chown_mode.
-
-        Old shape: bindings carried `rsh` per connection and chown_mode was
-        CHECK IN ('source', 'dest'). New shape: `rsh` lives on dest_devices
-        (it describes how to reach a device), and chown_mode gains 'custom'
-        ('dest' now means the fixed like-in-destination recipe; 'custom' is
-        the old force-these-exact-values behavior). Backfill copies each
-        remote device's most common binding rsh, then bindings is rebuilt
-        without the column. Fresh DBs match both predicates and are skipped.
-        """
-        device_cols = {row["name"] for row in
-                       self._conn.execute("PRAGMA table_info(dest_devices)")}
-        if "rsh" not in device_cols:
-            self._conn.execute("ALTER TABLE dest_devices ADD COLUMN rsh TEXT")
-
-        binding_cols = {row["name"] for row in
-                       self._conn.execute("PRAGMA table_info(bindings)")}
-        if "rsh" not in binding_cols:
-            return  # already the new shape
-
-        # One-time file backup before the destructive rebuild.
-        backup = self.path.with_name(self.path.name + ".pre-options-ux.bak")
         if self.path.exists() and not backup.exists():
-            self._conn.commit()
             shutil.copy2(self.path, backup)
+        q = lambda sql: [dict(r) for r in self._conn.execute(sql)]
+        containers = q("SELECT * FROM dest_containers")
+        old_devices = q("SELECT * FROM dest_devices ORDER BY id")
+        sources = {s["id"]: s for s in q("SELECT * FROM source_labels")}
+        bindings = q("SELECT * FROM bindings ORDER BY id")
 
-        # Backfill before the rebuild drops bindings.rsh. Most common
-        # non-blank value per device, deterministic tie-break; the
-        # `rsh IS NULL` guard keeps a partial earlier run from being
-        # clobbered on retry.
-        self._conn.execute(
-            """
-            UPDATE dest_devices SET rsh = (
-                SELECT b.rsh FROM bindings b
-                WHERE b.dest_device_id = dest_devices.id
-                  AND NULLIF(TRIM(b.rsh), '') IS NOT NULL
-                GROUP BY b.rsh
-                ORDER BY COUNT(*) DESC, b.rsh
-                LIMIT 1)
-            WHERE kind = 'remote' AND rsh IS NULL
-            """
-        )
+        c = self._conn
+        c.execute("BEGIN")
+        for g in containers:
+            c.execute("INSERT INTO groups(id, label, position) VALUES (?,?,?)",
+                      (g["id"], g["label"], g.get("position") or 0))
+        laptop = c.execute("INSERT INTO devices(label, kind) VALUES "
+                           "('Laptop', 'laptop')").lastrowid
+        # Old servers carried a base path in their target; one server
+        # (same user@host + ssh settings) becomes one device. Its name is
+        # the old entry with the most jobs.
+        uses = {}
+        for b in bindings:
+            uses[b["dest_device_id"]] = uses.get(b["dest_device_id"], 0) + 1
+        new_id, servers = {}, {}
+        for d in sorted(old_devices, key=lambda d: -uses.get(d["id"], 0)):
+            if d["kind"] == "local":
+                new_id[d["id"]] = c.execute(
+                    "INSERT INTO devices(label, kind, uuid) VALUES "
+                    "(?, 'drive', ?)", (d["label"], d["uuid"])).lastrowid
+                continue
+            host, _ = _split_target(d["network_target"])
+            key = (host, d.get("rsh") or "")
+            if key not in servers:
+                servers[key] = c.execute(
+                    "INSERT INTO devices(label, kind, host, rsh) VALUES "
+                    "(?, 'server', ?, ?)",
+                    (d["label"], host, d.get("rsh") or None)).lastrowid
+            new_id[d["id"]] = servers[key]
 
-        # Old 'dest' rows with values meant "force these exact values" —
-        # that is the new 'custom'. Value-less 'dest' rows keep 'dest'
-        # (the new fixed recipe is the closest preserved intent).
-        select_cols = ", ".join(
-            """CASE WHEN chown_mode = 'dest'
-                     AND (NULLIF(TRIM(chown_value), '') IS NOT NULL
-                          OR NULLIF(TRIM(chmod_value), '') IS NOT NULL)
-                    THEN 'custom' ELSE chown_mode END"""
-            if col == "chown_mode" else col
-            for col in ("id", *BINDING_COLS)
-        )
-        self._conn.commit()
-        self._conn.execute("PRAGMA foreign_keys = OFF")
-        self._conn.executescript(
-            f"""
-            DROP TABLE IF EXISTS bindings_new;
-            BEGIN IMMEDIATE;
-            {_bindings_ddl("bindings_new")}
-            INSERT INTO bindings_new (id, {", ".join(BINDING_COLS)})
-                SELECT {select_cols} FROM bindings;
-            DROP TABLE bindings;
-            ALTER TABLE bindings_new RENAME TO bindings;
-            COMMIT;
-            """
-        )
-        self._conn.execute("PRAGMA foreign_keys = ON")
+        devices_by_old = {d["id"]: d for d in old_devices}
+        opt_keys = [o["key"] for o in OPTIONS]
+        for b in bindings:
+            d = devices_by_old[b["dest_device_id"]]
+            s = sources[b["source_label_id"]]
+            if d["kind"] == "local":
+                dev_path = (b["dest_subpath"] or "").strip("/")
+            else:
+                dev_path = _join(_split_target(d["network_target"])[1],
+                                 b["dest_subpath"])
+            laptop_side = (laptop, s["path"])
+            dev_side = (new_id[d["id"]], dev_path)
+            pull = b.get("direction") == "pull"
+            frm, to = (dev_side, laptop_side) if pull else (laptop_side, dev_side)
+            # Pull jobs were titled by their laptop folder ("Appdata
+            # Backups"), not the server folder name; keep that title.
+            name = os.path.basename(s["path"].rstrip("/")) if pull else ""
+            row = {
+                "id": b["id"], "group_id": d["container_id"], "name": name,
+                "from_device_id": frm[0], "from_path": frm[1],
+                "to_device_id": to[0], "to_path": to[1],
+                "path_mode": b["path_mode"], "chown_mode": b["chown_mode"],
+                "chown_value": b["chown_value"],
+                "chmod_value": b["chmod_value"],
+                "excludes": b["excludes"],
+                **{k: b.get(k, int(o["default"]))
+                   for k, o in zip(opt_keys, OPTIONS)},
+            }
+            c.execute(f"INSERT INTO jobs({', '.join(row)}) VALUES "
+                      f"({', '.join('?' * len(row))})", list(row.values()))
+        for t in ("bindings", "dest_devices", "source_labels",
+                  "dest_containers"):
+            c.execute(f"DROP TABLE {t}")
+        c.execute("COMMIT")
 
-    # --- source_labels ------------------------------------------------------
+    # --- groups -------------------------------------------------------------
 
-    def add_source_label(self, *, label: str, path: str) -> int:
+    def add_group(self, *, label: str) -> int:
         cur = self._conn.execute(
-            "INSERT INTO source_labels(label, path) VALUES (?, ?)",
-            (label, path),
-        )
+            "INSERT INTO groups(label, position) VALUES "
+            "(?, (SELECT COALESCE(MAX(position) + 1, 0) FROM groups))",
+            (label,))
         self._conn.commit()
         self.db_changed.emit()
         return cur.lastrowid
 
-    def update_source_label(self, source_label_id: int, *,
-                            label=_UNSET, path=_UNSET) -> None:
-        changes = self._collect_changes(["label", "path"], locals())
-        self._apply_update("source_labels", source_label_id, changes)
-
-    def delete_source_label(self, source_label_id: int) -> None:
-        self._conn.execute(
-            "DELETE FROM source_labels WHERE id = ?", (source_label_id,)
-        )
-        self._conn.commit()
-        self.db_changed.emit()
-
-    def list_source_labels(self) -> list[dict]:
-        return [
-            dict(r) for r in self._conn.execute(
-                "SELECT * FROM source_labels ORDER BY label"
-            )
-        ]
-
-    # --- dest_containers ----------------------------------------------------
-
-    def add_dest_container(self, *, label: str) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO dest_containers(label) VALUES (?)", (label,)
-        )
-        self._conn.commit()
-        self.db_changed.emit()
-        return cur.lastrowid
-
-    def update_dest_container(self, container_id: int, *, label=_UNSET) -> None:
+    def update_group(self, group_id: int, *, label=_UNSET) -> None:
         changes = self._collect_changes(["label"], locals())
-        self._apply_update("dest_containers", container_id, changes)
+        self._apply_update("groups", group_id, changes)
 
-    def delete_dest_container(self, container_id: int) -> None:
-        self._conn.execute(
-            "DELETE FROM dest_containers WHERE id = ?", (container_id,)
-        )
+    def delete_group(self, group_id: int) -> None:
+        self._conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
         self._conn.commit()
         self.db_changed.emit()
 
-    def list_dest_containers(self) -> list[dict]:
-        return [
-            dict(r) for r in self._conn.execute(
-                "SELECT * FROM dest_containers ORDER BY position, label"
-            )
-        ]
+    def list_groups(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM groups ORDER BY position, label")]
 
-    def move_dest_container(self, container_id: int, delta: int) -> None:
-        """Swap a container with its neighbour (delta -1 = up, +1 = down).
-        Renumbers every container 0..n-1 so positions stay distinct."""
-        ids = [c["id"] for c in self.list_dest_containers()]
-        if container_id not in ids:
+    def move_group(self, group_id: int, delta: int) -> None:
+        """Swap a group with its neighbour (delta -1 = up, +1 = down).
+        Renumbers every group 0..n-1 so positions stay distinct."""
+        ids = [g["id"] for g in self.list_groups()]
+        if group_id not in ids:
             return
-        i = ids.index(container_id)
+        i = ids.index(group_id)
         j = i + delta
         if not 0 <= j < len(ids):
             return
         ids[i], ids[j] = ids[j], ids[i]
         self._conn.executemany(
-            "UPDATE dest_containers SET position = ? WHERE id = ?",
-            [(pos, cid) for pos, cid in enumerate(ids)],
-        )
+            "UPDATE groups SET position = ? WHERE id = ?",
+            [(pos, gid) for pos, gid in enumerate(ids)])
         self._conn.commit()
         self.db_changed.emit()
 
-    # --- dest_devices -------------------------------------------------------
+    # --- devices ------------------------------------------------------------
 
-    def add_dest_device(self, *, container_id: int, label: str, kind: str,
-                        uuid: str | None = None,
-                        network_target: str | None = None,
-                        rsh: str | None = None) -> int:
+    def add_device(self, values: dict) -> int:
+        row = {k: values.get(k) for k in DEVICE_COLS}
         cur = self._conn.execute(
-            "INSERT INTO dest_devices("
-            "container_id, label, kind, uuid, network_target, rsh"
-            ") VALUES (?, ?, ?, ?, ?, ?)",
-            (container_id, label, kind, uuid, network_target, rsh),
-        )
+            f"INSERT INTO devices({', '.join(row)}) VALUES "
+            f"({', '.join('?' * len(row))})", list(row.values()))
         self._conn.commit()
         self.db_changed.emit()
         return cur.lastrowid
 
-    def update_dest_device(self, device_id: int, *,
-                           container_id=_UNSET, label=_UNSET, kind=_UNSET,
-                           uuid=_UNSET, network_target=_UNSET,
-                           rsh=_UNSET) -> None:
-        changes = self._collect_changes(
-            ["container_id", "label", "kind", "uuid", "network_target", "rsh"],
-            locals(),
-        )
-        self._apply_update("dest_devices", device_id, changes)
+    def update_device(self, device_id: int, values: dict) -> None:
+        self._apply_update("devices", device_id,
+                           {k: v for k, v in values.items()
+                            if k in DEVICE_COLS and k != "kind"})
 
-    def delete_dest_device(self, device_id: int) -> None:
+    def delete_device(self, device_id: int) -> None:
+        # The laptop is built in and can't be deleted.
         self._conn.execute(
-            "DELETE FROM dest_devices WHERE id = ?", (device_id,)
-        )
+            "DELETE FROM devices WHERE id = ? AND kind != 'laptop'",
+            (device_id,))
         self._conn.commit()
         self.db_changed.emit()
 
-    def list_dest_devices(self, container_id: int | None = None) -> list[dict]:
-        if container_id is None:
-            rows = self._conn.execute(
-                "SELECT * FROM dest_devices ORDER BY label"
-            )
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM dest_devices WHERE container_id = ? ORDER BY label",
-                (container_id,),
-            )
-        return [dict(r) for r in rows]
+    def list_devices(self) -> list[dict]:
+        # Laptop first, then by name.
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM devices ORDER BY kind != 'laptop', label")]
 
-    # --- bindings -----------------------------------------------------------
+    # --- jobs ---------------------------------------------------------------
 
-    def add_binding(self, values: dict) -> int:
-        """Insert a binding. `values` maps column → value; unknown keys are
-        ignored, missing option/config columns take the catalog defaults.
-        Must include source_label_id and dest_device_id."""
-        row = dict(BINDING_DEFAULTS)
+    def add_job(self, values: dict) -> int:
+        """Insert a job. Unknown keys are ignored, missing option columns
+        take the catalog defaults. Needs group_id and both device ids."""
+        row = dict(JOB_DEFAULTS)
         row.update({k: _coerce(k, v) for k, v in values.items()
-                    if k in BINDING_COLS})
-        if "source_label_id" not in row or "dest_device_id" not in row:
-            raise ValueError(
-                "binding needs source_label_id and dest_device_id"
-            )
-        cols = ", ".join(row)
-        marks = ", ".join("?" * len(row))
+                    if k in JOB_COLS})
+        if not all(row.get(k) for k in
+                   ("group_id", "from_device_id", "to_device_id")):
+            raise ValueError("job needs group_id, from_device_id, to_device_id")
         cur = self._conn.execute(
-            f"INSERT INTO bindings({cols}) VALUES ({marks})",
-            list(row.values()),
-        )
+            f"INSERT INTO jobs({', '.join(row)}) VALUES "
+            f"({', '.join('?' * len(row))})", list(row.values()))
         self._conn.commit()
         self.db_changed.emit()
         return cur.lastrowid
 
-    def update_binding(self, binding_id: int, values: dict) -> None:
-        """Update the given columns of a binding; unknown keys are ignored."""
-        changes = {k: _coerce(k, v) for k, v in values.items()
-                   if k in BINDING_COLS}
-        self._apply_update("bindings", binding_id, changes)
+    def update_job(self, job_id: int, values: dict) -> None:
+        """Update the given columns of a job; unknown keys are ignored."""
+        self._apply_update("jobs", job_id,
+                           {k: _coerce(k, v) for k, v in values.items()
+                            if k in JOB_COLS})
 
-    def delete_binding(self, binding_id: int) -> None:
-        self._conn.execute("DELETE FROM bindings WHERE id = ?", (binding_id,))
+    def delete_job(self, job_id: int) -> None:
+        self._conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         self._conn.commit()
         self.db_changed.emit()
 
-    def list_bindings(self) -> list[dict]:
-        return [dict(r) for r in self._conn.execute("SELECT * FROM bindings")]
+    def list_jobs(self) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM jobs ORDER BY id")]
 
     # --- import_jobs --------------------------------------------------------
 

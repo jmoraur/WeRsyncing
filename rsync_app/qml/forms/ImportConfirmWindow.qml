@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../components"
 
-// Confirmation for running an import job. Shows the three folders and
+// Confirmation for running an import job, as a modal pop-up window. Shows the three folders and
 // says plainly what a real run does — in move mode, duplicates of
 // archived files are DELETED from the dump with no trash bin; in copy
 // mode nothing in the source is ever touched. Warnings must each be
@@ -12,13 +12,15 @@ import "../components"
 // archive" starts the report-only scan of the archive itself; "Remove
 // duplicates in archive" keeps one copy per identical set and deletes the
 // extras (the report is the preview).
-Dialog {
+ThemedWindow {
     id: dlg
-    modal: true
-    title: dlg.copyMode ? "Import from source folder"
-                        : "Import from dump folder"
-    standardButtons: Dialog.NoButton
-    width: 620
+    modality: Qt.ApplicationModal
+    flags: Qt.Dialog
+    visible: false
+    title: "Confirm import"
+    width: 680
+    height: Math.min(body.implicitHeight + 2 * Theme.s5,
+                     Screen.desktopAvailableHeight - 120)
 
     property int jobId: -1
     property var job: ({})
@@ -36,19 +38,28 @@ Dialog {
         dlg.open()
     }
 
-    onAboutToShow: {
+    function open() {
         dlg.job = connections.getImportJob(dlg.jobId)
         dlg.issues = connections.preflightImportDraft(dlg.job)
         dlg._acks = ({})
+        show()
+        raise()
+        requestActivate()
     }
 
-    contentItem: ColumnLayout {
+    ColumnLayout {
+        id: body
+        anchors.fill: parent
+        anchors.margins: Theme.s5
         spacing: Theme.s2
 
         Label {
-            text: dlg.job.label || ""
-            font.weight: Font.DemiBold
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            textFormat: Text.StyledText
             font.pixelSize: Theme.fsHeading
+            text: "You are about to import <b>" + (dlg.job.label || "")
+                  + "</b>. Are you sure?"
         }
 
         GridLayout {
@@ -133,7 +144,7 @@ Dialog {
                 enabled: !dlg.hasErrors
                 onClicked: {
                     connections.runArchiveDupReport(dlg.jobId)
-                    dlg.accept()
+                    dlg.close()
                 }
             }
             Button {
@@ -141,20 +152,20 @@ Dialog {
                 enabled: !dlg.hasErrors
                 onClicked: {
                     connections.runArchiveDedupe(dlg.jobId)
-                    dlg.accept()
+                    dlg.close()
                 }
             }
             Item { Layout.fillWidth: true }
             Button {
                 text: "Cancel"
-                onClicked: dlg.reject()
+                onClicked: dlg.close()
             }
             Button {
                 text: "Dry run"
                 enabled: !dlg.hasErrors
                 onClicked: {
                     connections.runImport(dlg.jobId, true)
-                    dlg.accept()
+                    dlg.close()
                 }
             }
             Button {
@@ -163,7 +174,7 @@ Dialog {
                 enabled: !dlg.hasErrors && dlg.allAcked
                 onClicked: {
                     connections.runImport(dlg.jobId, false)
-                    dlg.accept()
+                    dlg.close()
                 }
             }
         }

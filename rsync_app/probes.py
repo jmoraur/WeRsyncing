@@ -73,8 +73,8 @@ class RemoteProbeWatcher(QObject):
         button so a 2s wait on failure is expected behaviour.
         """
         device = next(
-            (d for d in self._db.list_dest_devices()
-             if d["id"] == device_id and d["kind"] == "remote"),
+            (d for d in self._db.list_devices()
+             if d["id"] == device_id and d["kind"] == "server"),
             None,
         )
         if device is None:
@@ -89,8 +89,8 @@ class RemoteProbeWatcher(QObject):
         # Drop stale entries, seed pending for new remotes, kick a refresh
         # so probe results follow the device list.
         remote_ids = {
-            d["id"] for d in self._db.list_dest_devices()
-            if d["kind"] == "remote"
+            d["id"] for d in self._db.list_devices()
+            if d["kind"] == "server"
         }
         stale = set(self._state) - remote_ids
         added = remote_ids - set(self._state)
@@ -105,8 +105,8 @@ class RemoteProbeWatcher(QObject):
     def _refresh(self) -> None:
         # Snapshot device list on the GUI thread; pass to worker.
         remotes = [
-            dict(d) for d in self._db.list_dest_devices()
-            if d["kind"] == "remote"
+            dict(d) for d in self._db.list_devices()
+            if d["kind"] == "server"
         ]
         if not remotes:
             if self._state:
@@ -131,7 +131,7 @@ class RemoteProbeWatcher(QObject):
     @staticmethod
     def _probe_device(device: dict) -> str:
         host = RemoteProbeWatcher._host_from_target(
-            device.get("network_target") or ""
+            device.get("host") or ""
         )
         if not host:
             return "unreachable"
@@ -163,14 +163,9 @@ class RemoteProbeWatcher(QObject):
 
     @staticmethod
     def _host_from_target(target: str) -> str:
-        """Parse host from `user@host:/path` or `host:/path`."""
-        if ":" not in target:
-            return ""
-        head, _, _ = target.partition(":")
-        if "@" in head:
-            _, _, host = head.partition("@")
-            return host
-        return head
+        """Parse host from `user@host`, `host`, or `user@host:/path`."""
+        head = (target or "").strip().partition(":")[0]
+        return head.rpartition("@")[2]
 
     @staticmethod
     def _tcp_probe(host: str, port: int) -> str:

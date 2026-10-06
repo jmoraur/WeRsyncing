@@ -2,8 +2,8 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Plain-language ownership & permissions editor, shared by ConnectionForm
-// and SyncConfirmDialog's single mode. Three choices map to chown_mode:
+// Plain-language ownership & permissions editor, shared by JobForm
+// and SyncConfirmWindow. Three choices map to chown_mode:
 //   "Like in source"      → 'source'  (preserve everything; --archive as-is)
 //   "Like in destination" → 'dest'    (fixed recipe; stored values ignored)
 //   "Custom…"             → 'custom'  (exact --chown/--chmod values)

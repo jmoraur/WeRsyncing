@@ -3,18 +3,17 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../components"
 
-// Dest-container dialog. Single label field — containers are pure
-// grouping, no other metadata. Reachable from the container row's
-// edit button and from inline-create in DeviceForm / ConnectionForm.
+// Group dialog. A group is only a label that groups jobs. Reachable
+// from the group row's edit button and from inline-create in JobForm.
 Dialog {
     id: dlg
     modal: true
-    title: dlg.containerId === -1 ? "New destination container"
-                                  : "Edit destination container"
+    anchors.centerIn: Overlay.overlay
+    title: dlg.groupId === -1 ? "New group" : "Edit group"
     standardButtons: Dialog.Save | Dialog.Cancel
     width: 460
 
-    property int containerId: -1
+    property int groupId: -1
     property string initialLabel: ""
 
     signal acceptedWithId(int newId)
@@ -27,11 +26,11 @@ Dialog {
     onAccepted: {
         const label = labelField.text.trim()
         if (!label) return
-        let newId = dlg.containerId
-        if (dlg.containerId === -1) {
-            newId = connections.addDestContainer(label)
+        let newId = dlg.groupId
+        if (dlg.groupId === -1) {
+            newId = connections.addGroup(label)
         } else {
-            connections.updateDestContainer(dlg.containerId, label)
+            connections.updateGroup(dlg.groupId, label)
         }
         dlg.acceptedWithId(newId)
     }
@@ -39,11 +38,11 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: Theme.s2
 
-        SectionLabel { text: "CONTAINER LABEL" }
+        SectionLabel { text: "GROUP NAME" }
         TextField {
             id: labelField
             Layout.fillWidth: true
-            placeholderText: "e.g. HDD case 1, Unraid server"
+            placeholderText: "e.g. NAS, X10 Pro"
         }
 
         Label {
@@ -51,8 +50,8 @@ Dialog {
             wrapMode: Text.Wrap
             opacity: 0.55
             font.pixelSize: Theme.fsSmall
-            text: "A container groups physical destination devices " +
-                  "(drives, servers) that belong together. No path of its own."
+            text: "A group only groups jobs in the list. " +
+                  "\"Sync all\" on a group runs every job in it."
         }
     }
 }

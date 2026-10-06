@@ -29,20 +29,10 @@ from rsync_app.theme import ThemeBridge
 
 
 def _find_output_panel(win) -> QObject:
-    # Walk the QML object tree for the OutputPanel by class name.
-    # We didn't tag it with objectName, but its top-level Item is the
-    # only one declaring the `_filter` property we need to set.
-    queue = [win]
-    while queue:
-        obj = queue.pop()
-        if obj.property("_filter") is not None and obj.metaObject().indexOfProperty("collapsed") >= 0:
-            # Distinguish OutputPanel from anything else that might
-            # happen to have a _filter — also check `jobCount`.
-            if obj.property("jobCount") is not None:
-                return obj
-        for child in obj.children():
-            queue.append(child)
-    raise RuntimeError("OutputPanel not found in QML tree")
+    panel = win.findChild(QObject, "outputPanel")
+    if panel is None:
+        raise RuntimeError("OutputPanel not found in QML tree")
+    return panel
 
 
 def main() -> int:
@@ -53,11 +43,11 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     app = QApplication(sys.argv)
-    app.setOrganizationName("RsyncApp")
-    app.setApplicationName("RsyncApp")
+    app.setApplicationName("RsyncAppSmoke")
     QQuickStyle.setStyle("Fusion")
 
-    db = Database()
+    # Throwaway database — never the real one.
+    db = Database(Path(tempfile.mkdtemp()) / "rsync.db")
     watcher = MountWatcher()
     probes = RemoteProbeWatcher(db)
     runner = SyncRunner()

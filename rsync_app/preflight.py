@@ -1,33 +1,38 @@
-"""Pure pre-flight checks for a binding about to run.
+"""Pure pre-flight checks for a job about to run.
 
-No I/O on Qt objects, no DB, no probes — the caller resolves the source
-filesystem path, the destination context (mountpoint or network target),
-and a single `available` bool (mounted for local, reachable for remote),
-then this module returns a list of issues.
+No I/O on Qt objects, no DB, no probes — the caller resolves both
+sides of the job (path + whether the device is there), then this module
+returns a list of issues.
 
 Issue shape: `{"severity": "error"|"warning", "code": str, "message": str}`.
 
-Errors block the run unconditionally. Warnings block until the user
-acknowledges each one in the dialog ("I understand").
+Errors block the run unconditionally. Each warning is its own
+confirmation popup; its `code` is the "kind" that "Yes to all" covers.
 """
 import os
 
 
-def check_binding(row: dict, source: dict, dest: dict) -> list[dict]:
-    """Inspect a binding draft + its resolved sides and return issues.
+def check_job(row: dict, src: dict, dst: dict) -> list[dict]:
+    """Inspect a job draft + its resolved sides and return issues.
 
-    `row` is the binding dict (path_mode, chown_*, opt_*, excludes,
-    dest_subpath). `source` is `{"path": <abs source path>}`. `dest` is
-    `{"kind": "local"|"remote", "base": <mountpoint|network_target>,
-    "subpath": <dest_subpath>, "available": <bool>}`.
+    `row` is the job dict (path_mode, chown_*, opt_*, excludes). `src` and
+    `dst` are resolved endpoints: {"kind": "laptop"|"drive"|"server",
+    "device": <device label>, "path": <local path or user@host:/path>,
+    "available": <drive connected / server answering; laptop always>}.
+    Both sides are checked the same way: the source must be there to
+    read, the destination must be creatable/writable. Server folders are
+    never inspected (the app doesn't log in to look).
     """
     issues: list[dict] = []
-    if row.get("direction") == "pull":
-        _check_pull(source, dest, issues)
-    else:
-        _check_source(source, issues)
-        _check_dest(dest, issues)
-    _check_warnings(row, source, dest, issues)
+    if src.get("kind") == "server" and dst.get("kind") == "server":
+        issues.append(_err(
+            "E_TWO_SERVERS",
+            "rsync can't copy from one server to another directly —"
+            " one side must be this laptop or a drive.",
+        ))
+    for side, role in ((src, "from"), (dst, "to")):
+        _check_side(side, role, issues)
+    _check_warnings(row, src, dst, issues)
     return issues
 
 
@@ -39,101 +44,48 @@ def _warn(code: str, message: str) -> dict:
     return {"severity": "warning", "code": code, "message": message}
 
 
-def _check_source(source: dict, issues: list[dict]) -> None:
-    path = (source or {}).get("path") or ""
+def _check_side(side: dict, role: str, issues: list[dict]) -> None:
+    kind = side.get("kind", "")
+    name = side.get("device") or "the device"
+    path = side.get("path") or ""
+    what = "copy from" if role == "from" else "copy to"
+    if not side.get("available"):
+        issues.append(_err(
+            f"E_{role.upper()}_UNAVAILABLE",
+            f"{name} is not connected." if kind == "drive"
+            else f"{name} did not respond. Check that it's online.",
+        ))
+        return
+    if kind == "server":
+        return
     if not path:
-        issues.append(_err("E_SRC_MISSING", "The source folder is not set."))
+        issues.append(_err(f"E_{role.upper()}_MISSING",
+                           f"The folder to {what} is not set."))
         return
-    if not os.path.isdir(path):
-        issues.append(_err(
-            "E_SRC_MISSING",
-            f"The source folder can't be found: {path}",
-        ))
-        return
-    if not os.access(path, os.R_OK):
-        issues.append(_err(
-            "E_SRC_UNREADABLE",
-            f"The app isn't allowed to read the source folder: {path}",
-        ))
-
-
-def _check_dest(dest: dict, issues: list[dict]) -> None:
-    kind = (dest or {}).get("kind", "")
-    available = bool((dest or {}).get("available"))
-    if kind == "local":
-        if not available:
+    if role == "from":
+        if not os.path.isdir(path):
             issues.append(_err(
-                "E_DEST_NOT_MOUNTED",
-                "The destination drive is not connected.",
-            ))
-            return
-        resolved = _resolved_dest_path(dest)
-        ancestor = _existing_ancestor(resolved)
-        if ancestor is None:
+                "E_FROM_MISSING",
+                f"The folder to copy from can't be found: {path}"))
+        elif not os.access(path, os.R_OK):
             issues.append(_err(
-                "E_DEST_PARENT_UNWRITABLE",
-                f"There's no folder to create the destination in: {resolved}",
-            ))
-            return
-        if not os.access(ancestor, os.W_OK):
-            issues.append(_err(
-                "E_DEST_PARENT_UNWRITABLE",
-                f"The destination folder can't be written to: {ancestor}",
-            ))
-        return
-    if kind == "remote":
-        if not available:
-            issues.append(_err(
-                "E_REMOTE_UNREACHABLE",
-                "The server did not respond. Check that it's online.",
-            ))
-
-
-def _check_pull(source: dict, dest: dict, issues: list[dict]) -> None:
-    """Pull = device → laptop: the device side must be there to read
-    from, the laptop folder must be creatable/writable."""
-    kind = (dest or {}).get("kind", "")
-    available = bool((dest or {}).get("available"))
-    if kind == "local":
-        if not available:
-            issues.append(_err(
-                "E_DEST_NOT_MOUNTED",
-                "The drive to copy from is not connected.",
-            ))
-        else:
-            resolved = _resolved_dest_path(dest)
-            if not os.path.isdir(resolved):
-                issues.append(_err(
-                    "E_PULL_FROM_MISSING",
-                    f"The folder to copy from can't be found: {resolved}",
-                ))
-    elif kind == "remote" and not available:
-        issues.append(_err(
-            "E_REMOTE_UNREACHABLE",
-            "The server did not respond. Check that it's online.",
-        ))
-
-    path = (source or {}).get("path") or ""
-    if not path:
-        issues.append(_err("E_SRC_MISSING", "The laptop folder is not set."))
+                "E_FROM_UNREADABLE",
+                f"The app isn't allowed to read the folder: {path}"))
         return
     ancestor = _existing_ancestor(path)
     if ancestor is None or not os.access(ancestor, os.W_OK):
         issues.append(_err(
-            "E_PULL_TO_UNWRITABLE",
-            f"The laptop folder can't be written to: {ancestor or path}",
-        ))
+            "E_TO_UNWRITABLE",
+            f"The folder to copy to can't be written to: {ancestor or path}"))
 
 
-def _check_warnings(row: dict, source: dict, dest: dict,
+def _check_warnings(row: dict, src: dict, dst: dict,
                     issues: list[dict]) -> None:
     if row.get("opt_delete"):
-        where = ("in the laptop folder" if row.get("direction") == "pull"
-                 else "on the destination")
         issues.append(_warn(
             "W_DELETE_ENABLED",
-            f"Files that exist only {where} will be deleted"
-            " (--delete is on).",
+            f"Files that exist only on {dst.get('device') or 'the destination'}"
+            f" ({dst.get('path') or '?'}) will be deleted (--delete is on).",
         ))
 
     path_mode = row.get("path_mode") or "contents"
@@ -141,26 +93,19 @@ def _check_warnings(row: dict, source: dict, dest: dict,
         issues.append(_warn(
             "W_PATH_MODE_FOLDER",
             "The source folder itself will be placed inside the"
-            " destination, not just its contents.",
+            " destination folder, not just its contents.",
         ))
 
-    src_path = (source or {}).get("path") or ""
-    if path_mode == "contents" and src_path:
-        src_leaf = os.path.basename(src_path.rstrip("/"))
-        dest_sub = (row.get("dest_subpath") or "").strip("/")
-        if dest_sub:
-            dest_leaf = os.path.basename(dest_sub)
-        else:
-            dest_leaf = os.path.basename(
-                ((dest or {}).get("base") or "").rstrip("/")
-            )
-        if src_leaf and dest_leaf and src_leaf.lower() != dest_leaf.lower():
-            issues.append(_warn(
-                "W_BASENAME_MISMATCH",
-                f"The source folder is called '{src_leaf}' but the"
-                f" destination folder is called '{dest_leaf}' —"
-                " double-check this is the right place.",
-            ))
+    src_leaf = _leaf(src.get("path"))
+    dst_leaf = _leaf(dst.get("path"))
+    if path_mode == "contents" and src_leaf and dst_leaf \
+            and src_leaf.lower() != dst_leaf.lower():
+        issues.append(_warn(
+            "W_BASENAME_MISMATCH",
+            f"The folder to copy from is called '{src_leaf}' but the"
+            f" folder to copy to is called '{dst_leaf}' —"
+            " double-check this is the right place.",
+        ))
 
     if row.get("chown_mode") == "custom":
         if not (row.get("chown_value") or "").strip():
@@ -197,7 +142,7 @@ def _check_warnings(row: dict, source: dict, dest: dict,
 
 def check_import_job(job: dict, index_empty: bool = False) -> list[dict]:
     """Inspect an import-job draft and return issues (same shape as
-    check_binding). `job` carries dump_path / dest_path / archive_root and
+    check_job). `job` carries dump_path / dest_path / archive_root and
     an optional truthy copy_mode; `index_empty` is True when the archive
     has no index rows yet (first run).
 
@@ -308,10 +253,10 @@ def _is_within(inner: str, outer: str) -> bool:
         return False
 
 
-def _resolved_dest_path(dest: dict) -> str:
-    base = (dest.get("base") or "").rstrip("/")
-    subpath = (dest.get("subpath") or "").strip("/")
-    return f"{base}/{subpath}" if subpath else base
+def _leaf(path: str | None) -> str:
+    """Last folder name of a local path or user@host:/path."""
+    path = (path or "").split(":", 1)[-1] if ":" in (path or "") else path
+    return os.path.basename((path or "").rstrip("/"))
 
 
 def _existing_ancestor(path: str) -> str | None:

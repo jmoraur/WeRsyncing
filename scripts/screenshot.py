@@ -26,8 +26,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("output", type=Path)
     ap.add_argument("--delay-ms", type=int, default=1500)
-    ap.add_argument("--view-mode", choices=("destination", "source"),
-                    default="destination")
+    ap.add_argument("--view-mode", choices=("group", "source"),
+                    default="group")
     args = ap.parse_args()
 
     app = QApplication(sys.argv)

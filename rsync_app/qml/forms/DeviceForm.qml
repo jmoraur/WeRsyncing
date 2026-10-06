@@ -3,51 +3,35 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import "../components"
 
-// Destination-device dialog. Identity only — no rsync options here
-// (those live on the binding). Kind picks the second half of the form:
-// local → UUID dropdown; remote → network_target + reachability test.
+// Device dialog. A device is a place folders live, identity only — no
+// paths or rsync options here (those belong to the job):
+//   drive  → picked from the mounted drives (filesystem UUID)
+//   server → user@host + optional ssh command, with a reachability test
+// The laptop is built in; only its name can be edited.
 //
-// Modes: deviceId === -1 → add, else → edit.
-// Kind is frozen in edit mode — a different UUID/target is effectively
-// a different drive; delete-and-recreate instead.
+// Modes: deviceId === -1 → add, else → edit (kind is then fixed).
 Dialog {
     id: dlg
     modal: true
-    title: dlg.deviceId === -1 ? "New destination device"
-                               : "Edit destination device"
+    anchors.centerIn: Overlay.overlay
+    title: dlg.deviceId === -1 ? "New device" : "Edit device"
     standardButtons: Dialog.Save | Dialog.Cancel
     width: 580
 
-    // Inputs.
     property int deviceId: -1
-    property int initialContainerId: -1   // preselect (e.g. from row context)
-    property string initialKind: "local"
-    property string initialLabel: ""
-    property string initialUuid: ""
-    property string initialNetworkTarget: ""
-    property string initialRsh: ""
 
     signal acceptedWithId(int newId)
 
-    // Snapshot of container list refreshed every open.
-    property var _containers: []
-    property string _kind: "local"
+    property string _kind: "drive"
     property string _selectedUuid: ""
     property string _probeResult: ""
 
-    function _refreshContainers(preselectId) {
-        _containers = connections.pickableContainers()
-        containerCombo.currentIndex =
-            _containers.findIndex(c => c.id === preselectId)
-    }
-
     function _refreshUuids(preselectUuid) {
         const list = connections.unassignedUuids()
-        // In edit mode, include the device's current UUID as a fixed
-        // entry so it remains visible/selected even though it's "taken".
+        // In edit mode keep the device's own UUID in the list.
         if (dlg.deviceId !== -1 && preselectUuid
                 && !list.some(x => x.uuid === preselectUuid)) {
-            list.unshift({ uuid: preselectUuid, mountpoint: "(current)" })
+            list.unshift({ uuid: preselectUuid, mountpoint: "(this drive)" })
         }
         uuidCombo.model = list
         const idx = list.findIndex(x => x.uuid === preselectUuid)
@@ -56,133 +40,89 @@ Dialog {
     }
 
     onAboutToShow: {
-        _kind = dlg.initialKind || "local"
-        labelField.text = dlg.initialLabel
-        networkTargetField.text = dlg.initialNetworkTarget
-        rshField.text = dlg.initialRsh
+        const d = dlg.deviceId === -1 ? {} : connections.getDevice(dlg.deviceId)
+        _kind = d.kind || "drive"
+        labelField.text = d.label || ""
+        hostField.text = d.host || ""
+        rshField.text = d.rsh || ""
         _probeResult = ""
-        _refreshContainers(dlg.initialContainerId)
-        _refreshUuids(dlg.initialUuid)
+        _refreshUuids(d.uuid || "")
         labelField.forceActiveFocus()
     }
 
     onAccepted: {
-        const containerId = containerCombo.currentValue
-        const label = labelField.text.trim()
-        if (containerId === undefined || containerId === null || !label)
-            return
         const draft = {
-            container_id: containerId,
-            label: label,
+            label: labelField.text.trim(),
             kind: _kind,
-            uuid: _kind === "local" ? _selectedUuid : "",
-            network_target: _kind === "remote"
-                            ? networkTargetField.text.trim() : "",
-            rsh: _kind === "remote" ? rshField.text.trim() : "",
+            uuid: _selectedUuid,
+            host: hostField.text.trim(),
+            rsh: rshField.text.trim(),
         }
-        if (_kind === "local" && !draft.uuid) return
-        if (_kind === "remote" && !draft.network_target) return
+        if (!draft.label) return
+        if (_kind === "drive" && !draft.uuid) return
+        if (_kind === "server" && !draft.host) return
         let newId = dlg.deviceId
-        if (dlg.deviceId === -1) {
-            newId = connections.addDestDevice(draft)
-        } else {
-            connections.updateDestDevice(dlg.deviceId, draft)
-        }
+        if (dlg.deviceId === -1) newId = connections.addDevice(draft)
+        else connections.updateDevice(dlg.deviceId, draft)
         dlg.acceptedWithId(newId)
     }
 
     contentItem: ColumnLayout {
         spacing: Theme.s2
 
-        SectionLabel { text: "CONTAINER" }
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.s1
-
-            ScrollComboBox {
-                id: containerCombo
-                Layout.fillWidth: true
-                model: dlg._containers
-                textRole: "label"
-                valueRole: "id"
-                displayText: currentIndex === -1
-                             ? "— select a container —"
-                             : currentText
-            }
-            RowActionButton {
-                icon.name: "list-add"
-                tip: "New container"
-                onClicked: childContainerForm.open()
-            }
+        SectionLabel { text: "KIND" }
+        SegmentedControl {
+            visible: dlg._kind !== "laptop"
+            // Kind is identity; don't flip after creation.
+            enabled: dlg.deviceId === -1
+            opacity: enabled ? 1.0 : 0.6
+            model: [
+                {value: "drive", label: "Drive (USB / disk)"},
+                {value: "server", label: "Server (over SSH)"},
+            ]
+            value: dlg._kind
+            onActivated: v => dlg._kind = v
+        }
+        Label {
+            visible: dlg._kind === "laptop"
+            text: "This computer (built in)"
+            opacity: 0.7
         }
 
         SectionLabel {
-            text: "KIND"
-            Layout.topMargin: Theme.s1
-        }
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: Theme.s2
-
-            SegmentedControl {
-                // Kind is identity; don't flip post-create.
-                enabled: dlg.deviceId === -1
-                opacity: enabled ? 1.0 : 0.5
-                model: [
-                    {value: "local", label: "Local (physical drive)"},
-                    {value: "remote", label: "Remote (over SSH)"},
-                ]
-                value: dlg._kind
-                onActivated: v => dlg._kind = v
-            }
-            Label {
-                visible: dlg.deviceId !== -1
-                text: "kind can't change after creation"
-                opacity: 0.5
-                font.pixelSize: Theme.fsSmall
-            }
-            Item { Layout.fillWidth: true }
-        }
-
-        SectionLabel {
-            text: "DEVICE LABEL"
+            text: "NAME"
             Layout.topMargin: Theme.s1
         }
         TextField {
             id: labelField
             Layout.fillWidth: true
-            placeholderText: dlg._kind === "local"
-                             ? "e.g. Backup-1"
-                             : "e.g. unraid /mnt/user"
+            placeholderText: dlg._kind === "server" ? "e.g. NAS" : "e.g. X10 Pro"
         }
 
-        // Local branch ----------------------------------------------------
+        // Drive -------------------------------------------------------------
         SectionLabel {
-            text: "FILESYSTEM UUID  ·  mounted drives"
-            visible: dlg._kind === "local"
+            text: "WHICH DRIVE  ·  mounted drives"
+            visible: dlg._kind === "drive"
             Layout.topMargin: Theme.s1
         }
         ScrollComboBox {
             id: uuidCombo
-            visible: dlg._kind === "local"
+            visible: dlg._kind === "drive"
             Layout.fillWidth: true
             textRole: "uuid"
             valueRole: "uuid"
             displayText: currentIndex === -1
-                         ? "— select a mounted drive —"
-                         : (model[currentIndex].uuid
-                            + "   " + model[currentIndex].mountpoint)
+                         ? "— pick a mounted drive —"
+                         : (model[currentIndex].mountpoint
+                            + "   " + model[currentIndex].uuid)
             delegate: ItemDelegate {
                 width: uuidCombo.width
                 contentItem: Column {
+                    Label { text: modelData.mountpoint }
                     Label {
                         text: modelData.uuid
+                        opacity: 0.6
                         font.family: Theme.mono
-                        font.pixelSize: Theme.fsMono
-                    }
-                    Label {
-                        text: modelData.mountpoint
-                        opacity: 0.65
                         font.pixelSize: Theme.fsSmall
                     }
                 }
@@ -190,73 +130,72 @@ Dialog {
             onActivated: dlg._selectedUuid = currentValue || ""
         }
         Label {
-            visible: dlg._kind === "local" && uuidCombo.count === 0
+            visible: dlg._kind === "drive" && uuidCombo.count === 0
             opacity: 0.6
             font.italic: true
             wrapMode: Text.Wrap
             Layout.fillWidth: true
-            text: "No unregistered drives are currently mounted. Plug one in, " +
-                  "wait a couple of seconds, and reopen this dialog."
+            text: "No new drives are mounted. Plug one in, wait a couple of"
+                  + " seconds, and open this dialog again."
+        }
+        Label {
+            visible: dlg._kind === "drive"
+            opacity: 0.55
+            font.pixelSize: Theme.fsSmall
+            wrapMode: Text.Wrap
+            Layout.fillWidth: true
+            text: "The drive is recognised by its filesystem ID, so it works"
+                  + " whatever folder it gets mounted at."
         }
 
-        // Remote branch ---------------------------------------------------
+        // Server ------------------------------------------------------------
         SectionLabel {
-            text: "NETWORK TARGET  ·  rsync syntax: user@host:/base/path"
-            visible: dlg._kind === "remote"
+            text: "LOGIN  ·  user@host"
+            visible: dlg._kind === "server"
             Layout.topMargin: Theme.s1
         }
         TextField {
-            id: networkTargetField
-            visible: dlg._kind === "remote"
+            id: hostField
+            visible: dlg._kind === "server"
             Layout.fillWidth: true
-            placeholderText: "user@nas:/mnt/backup"
+            placeholderText: "root@192.168.1.7"
             font.family: Theme.mono
             font.pixelSize: Theme.fsMono
         }
         SectionLabel {
-            text: "HOW TO REACH THIS SERVER (SSH)  ·  optional"
-            visible: dlg._kind === "remote"
+            text: "HOW TO REACH IT (SSH)  ·  optional"
+            visible: dlg._kind === "server"
             Layout.topMargin: Theme.s1
         }
         TextField {
             id: rshField
-            visible: dlg._kind === "remote"
+            visible: dlg._kind === "server"
             Layout.fillWidth: true
             placeholderText: "ssh -p 2222 -i ~/.ssh/key   (empty = plain ssh)"
             font.family: Theme.mono
             font.pixelSize: Theme.fsMono
         }
         RowLayout {
-            visible: dlg._kind === "remote"
-            Layout.fillWidth: true
+            visible: dlg._kind === "server"
             spacing: Theme.s2
 
             Button {
                 text: "Test connection"
-                enabled: networkTargetField.text.trim().length > 0
+                enabled: hostField.text.trim().length > 0
                 onClicked: {
                     dlg._probeResult = "probing…"
                     dlg._probeResult = remoteProbes.probeTarget(
-                        networkTargetField.text.trim(), rshField.text.trim())
+                        hostField.text.trim(), rshField.text.trim())
                 }
             }
             Label {
                 text: dlg._probeResult === "live"        ? "✓ reachable"
                     : dlg._probeResult === "unreachable" ? "✕ did not respond"
-                    : dlg._probeResult === "probing…"    ? "probing…"
-                                                         : ""
+                    : dlg._probeResult
                 color: dlg._probeResult === "live" ? Theme.ok
                      : dlg._probeResult === "unreachable" ? Theme.error
                      : Theme.textColor
             }
-        }
-    }
-
-    // Inline-create child for the container picker. Self-contained.
-    ContainerForm {
-        id: childContainerForm
-        onAcceptedWithId: function(newId) {
-            dlg._refreshContainers(newId)
         }
     }
 }

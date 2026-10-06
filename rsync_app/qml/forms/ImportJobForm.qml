@@ -16,6 +16,7 @@ import "../components"
 Dialog {
     id: dlg
     modal: true
+    anchors.centerIn: Overlay.overlay
     title: dlg.importJobId === -1 ? "New import" : "Edit import"
     standardButtons: Dialog.Save | Dialog.Cancel
     width: 560

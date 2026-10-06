@@ -8,8 +8,10 @@ Rectangle {
     id: box
 
     property var argv: []
+    // Already-quoted command; wins over argv when set.
+    property string text: ""
     property string placeholder: "(pick a source and a device to preview the command)"
-    readonly property bool hasCommand: argv && argv.length > 0
+    readonly property bool hasCommand: text !== "" || (argv && argv.length > 0)
 
     implicitHeight: cmdEdit.implicitHeight + 2 * Theme.s2
     radius: Theme.radius
@@ -29,7 +31,8 @@ Rectangle {
         font.pixelSize: Theme.fsMono
         color: box.hasCommand ? Theme.textColor
                               : Theme.tint(Theme.textColor, 0.5)
-        text: box.hasCommand ? Sh.quote(box.argv) : box.placeholder
+        text: box.text !== "" ? box.text
+              : box.hasCommand ? Sh.quote(box.argv) : box.placeholder
     }
 
     RowActionButton {

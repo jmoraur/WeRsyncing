@@ -56,34 +56,38 @@ for _opt in OPTIONS:
     _opt["default"] = _opt["baseline"]
 
 
-def _effective(binding_row: dict, overrides: dict | None, key: str):
+def _effective(job_row: dict, overrides: dict | None, key: str):
     if overrides and key in overrides:
         return overrides[key]
-    return binding_row.get(key)
+    return job_row.get(key)
 
 
-def _resolve_path(side: dict, path_mode: str) -> str:
-    base = side["base"].rstrip("/")
-    subpath = (side.get("subpath") or "").strip("/")
-    path = f"{base}/{subpath}" if subpath else base
-    if path_mode == "contents":
+def _with_mode(path: str, path_mode: str) -> str:
+    """contents → trailing slash (copy what's inside); folder → none."""
+    path = path.rstrip("/") or "/"
+    if path_mode == "contents" and not path.endswith("/"):
         path += "/"
     return path
 
 
 def build_rsync_argv(
-    binding_row: dict,
-    source: dict,
-    dest: dict,
+    job_row: dict,
+    src: dict,
+    dst: dict,
     runtime_overrides: dict | None = None,
 ) -> list[str]:
+    """rsync <options> <src> <dst>.
+
+    `src` / `dst` are resolved endpoints: {"path": local path or
+    "user@host:/path", "rsh": ssh command for a server side or ""}.
+    """
     argv = ["rsync"]
 
     for opt in OPTIONS:
-        if _effective(binding_row, runtime_overrides, opt["key"]):
+        if _effective(job_row, runtime_overrides, opt["key"]):
             argv.append(opt["flag"])
 
-    chown_mode = _effective(binding_row, runtime_overrides, "chown_mode")
+    chown_mode = _effective(job_row, runtime_overrides, "chown_mode")
     if chown_mode == "dest":
         # "Like in destination": files end up as if created fresh on the
         # receiving side — owned by the receiving account, default perms,
@@ -97,34 +101,27 @@ def build_rsync_argv(
         # through the receiver's umask. (Forcing a *different* owner still
         # needs a root receiving side; rsync silently keeps the receiving
         # account otherwise.)
-        chown_value = _effective(binding_row, runtime_overrides, "chown_value")
-        chmod_value = _effective(binding_row, runtime_overrides, "chmod_value")
+        chown_value = _effective(job_row, runtime_overrides, "chown_value")
+        chmod_value = _effective(job_row, runtime_overrides, "chmod_value")
         if chown_value:
             argv.append(f"--chown={chown_value}")
         if chmod_value:
             argv.append(f"--chmod={chmod_value}")
 
-    excludes = _effective(binding_row, runtime_overrides, "excludes")
+    excludes = _effective(job_row, runtime_overrides, "excludes")
     if excludes:
         for line in excludes.splitlines():
             pattern = line.strip()
             if pattern:
                 argv.append(f"--exclude={pattern}")
 
-    # rsh describes how to reach the *device*, so it rides on the dest
-    # context, not the binding — there is deliberately no per-run override.
-    rsh = dest.get("rsh")
+    # rsh describes how to reach a server, so it rides on the endpoint
+    # (only one side can be a server) — no per-run override.
+    rsh = src.get("rsh") or dst.get("rsh")
     if rsh:
         argv.append(f"--rsh={rsh}")
 
-    path_mode = _effective(binding_row, runtime_overrides, "path_mode")
-    laptop = _resolve_path(source, path_mode)
-    device = _resolve_path(dest, path_mode)
-    # "pull" copies device → laptop: same flags, the two paths swap. The
-    # binding keeps naming them source/dest (laptop folder / device side).
-    if binding_row.get("direction") == "pull":
-        argv += [device, laptop]
-    else:
-        argv += [laptop, device]
-
+    path_mode = _effective(job_row, runtime_overrides, "path_mode")
+    argv += [_with_mode(src["path"], path_mode),
+             _with_mode(dst["path"], path_mode)]
     return argv

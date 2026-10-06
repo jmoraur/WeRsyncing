@@ -2,67 +2,73 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// One row of the connections tree. `rowType` picks the variant:
-//   container / source  → group header (tinted band, bold label, pill)
-//   device              → liveness dot + label + mono mountpoint/target
-//   connection          → label + mono "source → dest" + run button
+// One row of the jobs tree. `rowType` picks the variant:
+//   group / source / importHeader / devicesHeader → section header
+//   device       → a destination device inside a group (sub-group)
+//   deviceEntry  → a device in the Devices list (edit / delete)
+//   job / importJob → one line (title) when folded; From / To / Options
+//                     + Edit / Delete when expanded
 //
-// The primary sync action is always visible (it is the point of the
-// app); edit / delete / add are icon buttons revealed on hover.
+// The sync button sits in one fixed column at the far left, so all run
+// actions line up; indentation starts after it. What a row syncs and
+// edits comes from the controller (scopeKind/scopeId…, editKind/editId),
+// so this file never works out ids itself.
 Item {
     id: row
 
     // Model roles from ConnectionsModel.
     required property string rowType
-    required property int nodeId
     required property string label
     required property int depth
     required property string aggregate
     required property string liveness
-    required property string deviceKind
-    required property string mountpoint
-    required property string sourcePath
-    required property string destDisplay
-    required property string destSubpath
+    required property string where
+    required property string fromDisplay
+    required property string toDisplay
+    required property string optsSummary
     required property bool canSync
-    required property int containerId
+    required property string scopeKind
+    required property int scopeId
+    required property int scopeId2
+    required property string editKind
+    required property int editId
+    required property int groupId
     required property int deviceId
-    required property int sourceLabelId
-    required property int bindingId
+    required property string jobKey
+    required property bool builtIn
     required property string groupKey
     required property bool hasChildren
     required property bool collapsed
     required property bool canMoveUp
     required property bool canMoveDown
 
-    signal syncRequested(string scopeKind, int scopeId)
-    signal editRequested(string rowType, int nodeId)
-    signal deleteRequested(string rowType, int nodeId, string label)
-    signal addConnectionRequested(int deviceId)
-    signal addDeviceRequested(int containerId)
-    signal toggleRequested(string groupKey)
-    signal moveRequested(int containerId, int delta)
+    // Job details open/closed — UI state owned by the page.
+    property bool expanded: false
 
-    readonly property bool isHeader: rowType === "container"
+    signal syncRequested(string kind, int id, int id2)
+    signal editRequested(string kind, int id)
+    signal deleteRequested(string kind, int id, string label)
+    signal newJobRequested(int groupId, int toDeviceId)
+    signal newDeviceRequested()
+    signal newImportRequested()
+    signal toggleRequested(string groupKey)
+    signal expandRequested(string key)
+    signal moveRequested(int groupId, int delta)
+
+    readonly property bool isHeader: rowType === "group"
                                      || rowType === "source"
                                      || rowType === "importHeader"
+                                     || rowType === "devicesHeader"
+    readonly property bool isJob: rowType === "job" || rowType === "importJob"
     readonly property bool isDevice: rowType === "device"
-    readonly property bool isConnection: rowType === "connection"
-    readonly property bool isImportHeader: rowType === "importHeader"
-    readonly property bool isImportJob: rowType === "importJob"
-    readonly property int editTarget: isConnection ? bindingId : nodeId
-    readonly property string syncScope: isConnection ? "connection"
-                                      : isImportJob ? "import"
-                                      : rowType
-    readonly property int syncId: isConnection ? bindingId
-                                : isDevice ? deviceId
-                                : rowType === "source" ? sourceLabelId
-                                : isImportJob ? nodeId
-                                : containerId
+                                     || rowType === "deviceEntry"
 
-    implicitHeight: isHeader ? Theme.rowHeader
-                  : isDevice ? Theme.rowDevice
-                  : Theme.rowConnection
+    readonly property int lineHeight: isHeader ? Theme.rowHeader
+                                    : isDevice ? Theme.rowDevice
+                                    : Theme.rowConnection
+
+    implicitHeight: lineHeight + (details.visible ? details.implicitHeight
+                                                    + Theme.s2 : 0)
     height: implicitHeight
 
     HoverHandler { id: rowHover }
@@ -71,30 +77,61 @@ Item {
         anchors.fill: parent
         radius: Theme.radius
         color: row.isHeader ? Theme.surfaceAlt
+             : row.expanded ? Theme.tint(Theme.textColor, Theme.dark ? 0.05 : 0.03)
              : rowHover.hovered ? Theme.hoverBg
              : "transparent"
     }
 
+    // --- Main line ---------------------------------------------------
     RowLayout {
-        anchors.fill: parent
-        anchors.leftMargin: Theme.s3 + row.depth * 22
+        id: line
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: row.lineHeight
+        anchors.leftMargin: Theme.s1
         anchors.rightMargin: Theme.s2
         spacing: Theme.s2
 
-        // Fold arrow on rows that hold others (groups, devices). Every row
-        // keeps the slot so labels line up at each depth. Text glyph, not a
-        // theme icon: it renders everywhere (offscreen smoke runs too).
+        // Primary action: sync, always in the first column.
+        RowActionButton {
+            visible: row.scopeKind !== ""
+            icon.name: row.rowType === "importJob" ? "document-import"
+                                                   : "view-refresh"
+            accent: true
+            enabled: row.canSync
+            tip: row.rowType === "importJob"
+                 ? (row.canSync ? "Import new files from the dump folder"
+                                : "One of this import's folders is missing"
+                                  + " — edit it first")
+                 : row.rowType === "job"
+                 ? (row.canSync ? "Sync this job"
+                                : "A device of this job is not available")
+                 : (row.canSync ? "Sync every job in here"
+                                : "Nothing ready to sync")
+            onClicked: row.syncRequested(row.scopeKind, row.scopeId,
+                                         row.scopeId2)
+        }
+        Item {
+            visible: row.scopeKind === ""
+            implicitWidth: 28
+        }
+
+        Item { implicitWidth: row.depth * 20 }
+
+        // Fold arrow: headers fold their children, jobs fold their details.
+        // Text glyph (renders offscreen too).
         Label {
-            text: !row.hasChildren ? "" : row.collapsed ? "\u25B8" : "\u25BE"
+            readonly property bool foldable: row.hasChildren || row.isJob
+            readonly property bool open: row.isJob ? row.expanded
+                                                   : !row.collapsed
+            text: !foldable ? "" : open ? "▾" : "▸"
             horizontalAlignment: Text.AlignHCenter
-            Layout.preferredWidth: 16
-            font.pixelSize: 16
-            opacity: arrowHover.hovered ? 1.0 : 0.6
+            Layout.preferredWidth: 14
+            font.pixelSize: 14
+            opacity: arrowHover.hovered ? 1.0 : 0.55
             HoverHandler { id: arrowHover; cursorShape: Qt.PointingHandCursor }
-            TapHandler {
-                enabled: row.hasChildren
-                onTapped: row.toggleRequested(row.groupKey)
-            }
+            TapHandler { onTapped: row._fold() }
         }
 
         LivenessDot {
@@ -104,129 +141,159 @@ Item {
 
         Label {
             text: row.label
-            font.weight: row.isHeader ? Font.Bold
-                       : row.isDevice ? Font.DemiBold
+            font.weight: row.isHeader ? Font.DemiBold
+                       : row.isDevice ? Font.Medium
                        : Font.Normal
             elide: Text.ElideRight
-            Layout.preferredWidth: row.isHeader ? implicitWidth
-                                                : Math.min(implicitWidth, 230)
-            // Clicking a group's name folds it too.
-            TapHandler {
-                enabled: row.hasChildren
-                onTapped: row.toggleRequested(row.groupKey)
-            }
+            Layout.fillWidth: row.where === ""
+            Layout.maximumWidth: row.where !== "" ? implicitWidth : -1
+            HoverHandler { cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: row._fold() }
         }
 
-        // Secondary text: paths in monospace, dimmed.
+        // Devices: where the device lives, dim.
         Label {
-            text: {
-                if (row.isDevice)
-                    return row.deviceKind === "local"
-                           ? (row.mountpoint || "not mounted")
-                           : row.destDisplay
-                if (row.isConnection || row.isImportJob)
-                    return row.sourcePath + "  →  " + row.destDisplay
-                if (row.rowType === "source")
-                    return row.sourcePath
-                return ""
-            }
-            visible: text !== ""
-            opacity: 0.6
-            font.family: Theme.mono
-            font.pixelSize: Theme.fsMono
+            visible: row.where !== ""
+            text: row.where
+            opacity: 0.5
+            font.pixelSize: Theme.fsSmall
             elide: Text.ElideMiddle
             Layout.fillWidth: true
         }
 
-        // Container rows have no secondary text — flexible spacer so the
-        // pill + actions hug the right.
-        Item {
-            visible: row.rowType === "container" || row.isImportHeader
-            Layout.fillWidth: true
+        // Group summary ("2/3 ready").
+        Label {
+            visible: row.aggregate !== "" && !row.isJob
+            text: row.aggregate
+            font.pixelSize: Theme.fsSmall
+            opacity: 0.55
         }
 
-        // Aggregate pill ("2/3 reachable", "empty", "no connections").
-        Rectangle {
-            visible: row.aggregate !== ""
-            implicitWidth: pillLabel.implicitWidth + 14
-            implicitHeight: 18
-            radius: 9
-            color: Theme.tint(Theme.textColor, 0.08)
-
-            Label {
-                id: pillLabel
-                anchors.centerIn: parent
-                text: row.aggregate
-                font.pixelSize: Theme.fsSmall
-                opacity: 0.75
-            }
-        }
-
-        // --- Hover-revealed secondary actions -------------------------
+        // --- Hover actions for headers and devices --------------------
         RowLayout {
             spacing: 0
-            opacity: rowHover.hovered ? 1.0 : 0.0
-            visible: opacity > 0
-            Behavior on opacity { NumberAnimation { duration: 120 } }
+            visible: !row.isJob && rowHover.hovered
 
             RowActionButton {
-                visible: row.rowType === "container"
+                visible: row.rowType === "group"
                 enabled: row.canMoveUp
                 icon.name: "go-up"
                 tip: "Move group up"
-                onClicked: row.moveRequested(row.containerId, -1)
+                onClicked: row.moveRequested(row.groupId, -1)
             }
             RowActionButton {
-                visible: row.rowType === "container"
+                visible: row.rowType === "group"
                 enabled: row.canMoveDown
                 icon.name: "go-down"
                 tip: "Move group down"
-                onClicked: row.moveRequested(row.containerId, 1)
+                onClicked: row.moveRequested(row.groupId, 1)
             }
             RowActionButton {
-                visible: row.rowType === "container"
+                visible: row.rowType === "group" || row.rowType === "device"
                 icon.name: "list-add"
-                tip: "Add device to this container"
-                onClicked: row.addDeviceRequested(row.containerId)
+                tip: "New job here"
+                onClicked: row.newJobRequested(
+                    row.groupId, row.rowType === "device" ? row.deviceId : -1)
             }
             RowActionButton {
-                visible: row.isDevice
+                visible: row.rowType === "devicesHeader"
                 icon.name: "list-add"
-                tip: "Add connection to this device"
-                onClicked: row.addConnectionRequested(row.deviceId)
+                tip: "New device"
+                onClicked: row.newDeviceRequested()
             }
             RowActionButton {
-                visible: !row.isImportHeader
+                visible: row.rowType === "importHeader"
+                icon.name: "list-add"
+                tip: "New import"
+                onClicked: row.newImportRequested()
+            }
+            RowActionButton {
+                visible: row.editKind !== ""
                 icon.name: "document-edit"
-                tip: "Edit"
-                onClicked: row.editRequested(row.rowType, row.editTarget)
+                tip: row.isDevice || row.rowType === "source"
+                     ? "Edit device" : "Edit"
+                onClicked: row.editRequested(row.editKind, row.editId)
             }
             RowActionButton {
-                visible: !row.isImportHeader
+                visible: row.rowType === "group"
+                         || (row.rowType === "deviceEntry" && !row.builtIn)
                 icon.name: "edit-delete"
                 danger: true
                 tip: "Delete"
-                onClicked: row.deleteRequested(row.rowType, row.editTarget,
+                onClicked: row.deleteRequested(row.editKind, row.editId,
                                                row.label)
             }
         }
+    }
 
-        // --- Primary sync action (always visible) ---------------------
-        RowActionButton {
-            visible: !row.isImportHeader
-            icon.name: row.isImportJob ? "document-import" : "view-refresh"
-            accent: true
-            enabled: row.canSync
-            tip: row.isImportJob
-                 ? (row.canSync ? "Import new files from the dump folder"
-                                : "One of this import's folders is missing"
-                                  + " — edit it first")
-                 : row.isConnection
-                 ? (row.canSync ? "Sync this connection"
-                                : "Destination unreachable")
-                 : (row.canSync ? "Sync everything reachable here"
-                                : "Nothing reachable to sync")
-            onClicked: row.syncRequested(row.syncScope, row.syncId)
+    // --- Job details (expanded) --------------------------------------
+    ColumnLayout {
+        id: details
+        visible: row.isJob && row.expanded
+        anchors.top: line.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        // Line up under the title: sync column + indent + arrow + dot.
+        anchors.leftMargin: Theme.s1 + 28 + row.depth * 20 + 14
+                            + 8 + 4 * Theme.s2
+        anchors.rightMargin: Theme.s3
+        spacing: Theme.s1
+
+        GridLayout {
+            Layout.fillWidth: true
+            columns: 2
+            columnSpacing: Theme.s3
+            rowSpacing: 2
+
+            Label { text: "From"; opacity: 0.55; font.pixelSize: Theme.fsSmall; Layout.alignment: Qt.AlignTop }
+            Label {
+                text: row.fromDisplay
+                font.family: Theme.mono
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.WrapAnywhere
+                Layout.fillWidth: true
+            }
+            Label { text: "To"; opacity: 0.55; font.pixelSize: Theme.fsSmall; Layout.alignment: Qt.AlignTop }
+            Label {
+                text: row.toDisplay
+                font.family: Theme.mono
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.WrapAnywhere
+                Layout.fillWidth: true
+            }
+            Label { text: "Options"; opacity: 0.55; font.pixelSize: Theme.fsSmall; Layout.alignment: Qt.AlignTop }
+            Label {
+                text: row.optsSummary
+                font.pixelSize: Theme.fsSmall
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
         }
+
+        RowLayout {
+            spacing: Theme.s1
+            Button {
+                flat: true
+                text: "Edit"
+                icon.name: "document-edit"
+                icon.color: Theme.textColor
+                font.pixelSize: Theme.fsSmall
+                onClicked: row.editRequested(row.editKind, row.editId)
+            }
+            Button {
+                flat: true
+                text: "Delete"
+                icon.name: "edit-delete"
+                icon.color: Theme.textColor
+                font.pixelSize: Theme.fsSmall
+                onClicked: row.deleteRequested(row.editKind, row.editId,
+                                               row.label)
+            }
+        }
+    }
+
+    function _fold() {
+        if (row.isJob) row.expandRequested(row.jobKey)
+        else if (row.hasChildren) row.toggleRequested(row.groupKey)
     }
 }

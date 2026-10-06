@@ -2,31 +2,26 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Bottom-of-page output panel for the SyncRunner.
+// Activity pane (right side of the page) for the SyncRunner.
 //
-// The Repeater uses a ListModel (not a JS array) so existing delegates
-// stay alive across `jobsChanged` reconciliation — that keeps each
-// delegate's log buffer + per-job collapse state intact while only
-// state/exit fields are mutated in place.
+// Top: one line per run, filtered by the All / Running / Failed / Done
+// tabs. Bottom: the selected run's command and its log, which fills all
+// remaining height. A run that starts while nothing running is selected
+// takes the selection, so the log follows the work.
 //
-// Per-delegate `Connections` filtered by `jobId` stream incremental
-// output into the right log area. The runner is the source of truth;
-// the panel is a thin viewer.
-//
-// Model field names avoid `state` (collides with Item.state — lessons).
-// State counts are plain int properties recomputed in _refresh() so the
-// filter labels stay reactive on state transitions, which ListModel.get()
-// inside a binding would not guarantee.
+// The ListModel keeps per-run fields stable across `jobsChanged`
+// reconciliation; only state/exit are mutated in place. Model field names
+// avoid `state` (collides with Item.state — lessons).
 Item {
     id: panel
 
-    // Bound by ConnectionsPage to drive SplitView sizing.
-    property bool collapsed: false
     // Persisted via QSettings outputFilter alias in ConnectionsPage.
     // Values: "all" | "running" | "failed" | "done".
     property string _filter: "all"
-    readonly property int headerHeight: 38
-    readonly property int jobCount: jobModel.count
+    property int selectedJobId: -1
+    // Bumped on every model change so bindings reading jobModel.get()
+    // re-evaluate (get() alone isn't tracked).
+    property int _rev: 0
 
     property int nRunning: 0
     property int nPending: 0
@@ -37,6 +32,12 @@ Item {
 
     ListModel { id: jobModel }
 
+    function _indexOf(jobId) {
+        for (let i = 0; i < jobModel.count; i++)
+            if (jobModel.get(i).jobId === jobId) return i
+        return -1
+    }
+
     function _refresh() {
         const snap = syncRunner.jobs()
 
@@ -46,17 +47,13 @@ Item {
             if (!liveIds[jobModel.get(i).jobId]) jobModel.remove(i)
         }
 
-        const existing = {}
-        for (let i = 0; i < jobModel.count; i++) {
-            existing[jobModel.get(i).jobId] = i
-        }
         const counts = {running: 0, pending: 0, done: 0,
                         failed: 0, cancelled: 0}
         for (let i = 0; i < snap.length; i++) {
             const j = snap[i]
             counts[j.state] = (counts[j.state] || 0) + 1
-            if (j.id in existing) {
-                const idx = existing[j.id]
+            const idx = _indexOf(j.id)
+            if (idx >= 0) {
                 jobModel.setProperty(idx, "jobState", j.state)
                 jobModel.setProperty(idx, "exitCode", j.exitCode)
             } else {
@@ -64,10 +61,8 @@ Item {
                     jobId: j.id,
                     label: j.label,
                     argvText: Sh.quote(j.argv),
-                    destDeviceId: j.destDeviceId,
                     jobState: j.state,
                     exitCode: j.exitCode,
-                    jobCollapsed: false,
                 })
             }
         }
@@ -76,19 +71,31 @@ Item {
         nDone = counts.done
         nFailed = counts.failed
         nCancelled = counts.cancelled
+        _rev++
+
+        if (_indexOf(selectedJobId) < 0)
+            _select(jobModel.count > 0 ? jobModel.get(jobModel.count - 1).jobId
+                                       : -1)
     }
 
-    function _matchesFilter(jobState) {
-        if (panel._filter === "all") return true
-        return jobState === panel._filter
+    function _select(jobId) {
+        if (jobId === selectedJobId) return
+        selectedJobId = jobId
+        logArea.text = jobId >= 0 ? syncRunner.jobLog(jobId) : ""
+        logArea.cursorPosition = logArea.length
     }
 
-    function _visibleCount() {
-        let n = 0
-        for (let i = 0; i < jobModel.count; i++) {
-            if (_matchesFilter(jobModel.get(i).jobState)) n++
-        }
-        return n
+    readonly property var _selected: {
+        _rev   // dependency: re-evaluate on every refresh
+        const i = _indexOf(selectedJobId)
+        return i >= 0 ? jobModel.get(i) : null
+    }
+
+    function _shown(jobState) {
+        if (_filter === "all") return true
+        if (_filter === "running")
+            return jobState === "running" || jobState === "pending"
+        return jobState === _filter
     }
 
     function _stateColor(s) {
@@ -98,319 +105,220 @@ Item {
              : Theme.idle   // pending / cancelled
     }
 
+    function _stateGlyph(s) {
+        return s === "done" ? "✓"
+             : s === "failed" ? "✕"
+             : s === "running" ? "●"
+             : s === "cancelled" ? "–"
+             : "○"   // pending
+    }
+
     Connections {
         target: syncRunner
         function onJobsChanged() { panel._refresh() }
-        function onJobStateChanged(jobId, state) { panel._refresh() }
+        function onJobStateChanged(jobId, state) {
+            panel._refresh()
+            // Follow the work: a starting run takes the selection unless
+            // the selected one is still running.
+            const sel = panel._selected
+            if (state === "running" && (!sel || sel.jobState !== "running"))
+                panel._select(jobId)
+        }
+        function onJobOutputAppended(id, t) {
+            if (id !== panel.selectedJobId) return
+            // Sample BEFORE insert: follow the tail only if the user was
+            // already at the bottom. insert (not append) avoids a stray
+            // newline.
+            const sb = logScroll.ScrollBar.vertical
+            const wasAtBottom = (sb.size + sb.position) >= 0.999
+            logArea.insert(logArea.length, t)
+            if (wasAtBottom) logArea.cursorPosition = logArea.length
+        }
     }
 
     Component.onCompleted: _refresh()
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 0
+        spacing: Theme.s2
 
-        // --- Header bar (always visible) -----------------------------
-        Rectangle {
-            Layout.fillWidth: true
-            implicitHeight: panel.headerHeight
-            color: Theme.surfaceAlt
-            radius: Theme.radius
-
-            RowLayout {
-                anchors.fill: parent
-                anchors.leftMargin: Theme.s1
-                anchors.rightMargin: Theme.s2
-                spacing: Theme.s2
-
-                RowActionButton {
-                    icon.name: panel.collapsed ? "arrow-right" : "arrow-down"
-                    tip: panel.collapsed ? "Expand output" : "Collapse output"
-                    onClicked: panel.collapsed = !panel.collapsed
-                }
-
-                Label {
-                    text: "Sync output"
-                    font.weight: Font.DemiBold
-                }
-
-                Label {
-                    opacity: 0.6
-                    font.pixelSize: Theme.fsSmall
-                    text: {
-                        if (jobModel.count === 0) return "no jobs yet"
-                        const parts = []
-                        if (panel.nRunning) parts.push(panel.nRunning + " running")
-                        if (panel.nPending) parts.push(panel.nPending + " queued")
-                        if (panel.nDone) parts.push(panel.nDone + " done")
-                        if (panel.nFailed) parts.push(panel.nFailed + " failed")
-                        if (panel.nCancelled) parts.push(panel.nCancelled + " cancelled")
-                        return parts.join("  ·  ")
-                    }
-                }
-
-                Item { Layout.fillWidth: true }
-
-                ToolButton {
-                    text: "Cancel all"
-                    enabled: panel.nActive > 0
-                    onClicked: syncRunner.cancelAll()
-                }
-                ToolButton {
-                    text: "Clear finished"
-                    enabled: jobModel.count > panel.nActive
-                    onClicked: syncRunner.clearFinished()
-                }
-            }
-        }
-
-        // --- Filter row (above body) ----------------------------------
+        // --- Header ---------------------------------------------------
         RowLayout {
-            visible: !panel.collapsed
             Layout.fillWidth: true
-            Layout.topMargin: Theme.s2
-            Layout.bottomMargin: Theme.s1
+            Layout.preferredHeight: Theme.rowHeader
             spacing: Theme.s2
 
-            SegmentedControl {
-                model: [
-                    {value: "all", label: "All " + jobModel.count},
-                    {value: "running", label: "Running " + panel.nRunning},
-                    {value: "failed", label: "Failed " + panel.nFailed},
-                    {value: "done", label: "Done " + panel.nDone},
-                ]
-                value: panel._filter
-                onActivated: v => panel._filter = v
+            Label {
+                text: "Activity"
+                font.weight: Font.DemiBold
+                Layout.leftMargin: Theme.s1
             }
             Item { Layout.fillWidth: true }
+            ToolButton {
+                text: "Cancel all"
+                enabled: panel.nActive > 0
+                onClicked: syncRunner.cancelAll()
+            }
+            ToolButton {
+                text: "Clear finished"
+                enabled: jobModel.count > panel.nActive
+                onClicked: syncRunner.clearFinished()
+            }
         }
 
-        // --- Body (jobs list) ----------------------------------------
-        ScrollView {
-            visible: !panel.collapsed
+        TabBar {
+            id: tabs
+            objectName: "activityTabs"
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            readonly property var values: ["all", "running", "failed", "done"]
+            currentIndex: Math.max(0, values.indexOf(panel._filter))
+            onCurrentIndexChanged: panel._filter = values[currentIndex]
+
+            TabButton { text: "All  " + jobModel.count }
+            TabButton { text: "Running  " + panel.nActive }
+            TabButton { text: "Failed  " + panel.nFailed }
+            TabButton { text: "Done  " + panel.nDone }
+        }
+
+        // --- Run list -------------------------------------------------
+        ListView {
+            id: runList
+            Layout.fillWidth: true
+            // Up to ~6 lines, then it scrolls.
+            Layout.preferredHeight: Math.min(contentHeight,
+                                             6 * Theme.rowConnection)
             clip: true
+            model: jobModel
+            ScrollBar.vertical: ScrollBar {}
 
-            ColumnLayout {
-                width: panel.width
-                spacing: Theme.s2
+            delegate: Rectangle {
+                id: runRow
+                required property int jobId
+                required property string label
+                required property string jobState
+                required property int exitCode
 
-                Label {
-                    visible: jobModel.count === 0
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.topMargin: Theme.s4
-                    text: "Run a sync to see output here."
-                    opacity: 0.5
-                }
+                width: runList.width
+                height: visible ? Theme.rowConnection : 0
+                visible: panel._shown(jobState)
+                radius: Theme.radius
+                color: jobId === panel.selectedJobId
+                       ? Theme.tint(Theme.accent, 0.18)
+                       : runHover.hovered ? Theme.hoverBg : "transparent"
 
-                Label {
-                    visible: jobModel.count > 0 && panel._visibleCount() === 0
-                    Layout.alignment: Qt.AlignHCenter
-                    Layout.topMargin: Theme.s4
-                    text: "No jobs match the current filter."
-                    opacity: 0.5
-                }
+                HoverHandler { id: runHover }
+                TapHandler { onTapped: panel._select(runRow.jobId) }
 
-                Repeater {
-                    model: jobModel
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Theme.s2
+                    anchors.rightMargin: Theme.s1
+                    spacing: Theme.s2
 
-                    delegate: Rectangle {
-                        id: jobCard
-                        // ListModel auto-injects these as delegate-scope
-                        // required properties.
-                        required property int index
-                        required property int jobId
-                        required property string label
-                        required property string argvText
-                        required property int destDeviceId
-                        required property string jobState
-                        required property int exitCode
-                        required property bool jobCollapsed
-
+                    Label {
+                        text: panel._stateGlyph(runRow.jobState)
+                        color: panel._stateColor(runRow.jobState)
+                        font.bold: true
+                        Layout.preferredWidth: 14
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    Label {
+                        text: runRow.label
+                        elide: Text.ElideRight
                         Layout.fillWidth: true
-                        Layout.rightMargin: Theme.s2
-                        visible: panel._matchesFilter(jobState)
-                        // Invisible cards must not reserve layout cells.
-                        Layout.preferredHeight: visible ? implicitHeight : 0
-                        Layout.maximumHeight: visible ? -1 : 0
-                        implicitHeight: cardColumn.implicitHeight + 2 * Theme.s2
-                        radius: Theme.radius
-                        color: Theme.surface
-                        border.width: 1
-                        border.color: Theme.border
-
-                        ColumnLayout {
-                            id: cardColumn
-                            anchors.fill: parent
-                            anchors.margins: Theme.s2
-                            spacing: Theme.s1
-
-                            // Header: collapse + state badge + label
-                            // + exit + cancel.
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: Theme.s2
-
-                                RowActionButton {
-                                    implicitWidth: 24
-                                    implicitHeight: 24
-                                    icon.name: jobCard.jobCollapsed
-                                               ? "arrow-right" : "arrow-down"
-                                    tip: jobCard.jobCollapsed
-                                         ? "Expand job" : "Collapse job"
-                                    onClicked: jobModel.setProperty(
-                                        jobCard.index,
-                                        "jobCollapsed",
-                                        !jobCard.jobCollapsed)
-                                }
-
-                                Rectangle {
-                                    implicitWidth: badgeLabel.implicitWidth + 14
-                                    implicitHeight: 18
-                                    radius: 9
-                                    color: Theme.tint(
-                                        panel._stateColor(jobCard.jobState), 0.18)
-
-                                    Label {
-                                        id: badgeLabel
-                                        anchors.centerIn: parent
-                                        text: jobCard.jobState
-                                        color: panel._stateColor(jobCard.jobState)
-                                        font.weight: Font.DemiBold
-                                        font.pixelSize: Theme.fsSmall
-                                    }
-                                }
-
-                                Label {
-                                    text: jobCard.label
-                                    font.weight: Font.DemiBold
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
-
-                                Label {
-                                    visible: jobCard.jobState === "done"
-                                             || jobCard.jobState === "failed"
-                                    text: "exit " + jobCard.exitCode
-                                    opacity: 0.6
-                                    font.family: Theme.mono
-                                    font.pixelSize: Theme.fsSmall
-                                }
-
-                                ToolButton {
-                                    text: "Cancel"
-                                    visible: jobCard.jobState === "running"
-                                             || jobCard.jobState === "pending"
-                                    onClicked: syncRunner.cancel(jobCard.jobId)
-                                }
-                            }
-
-                            // Argv row with copy button. Import jobs run
-                            // in-process and have no command line to show.
-                            RowLayout {
-                                visible: !jobCard.jobCollapsed
-                                         && jobCard.argvText !== ""
-                                Layout.fillWidth: true
-                                spacing: Theme.s1
-
-                                TextEdit {
-                                    id: argvEdit
-                                    Layout.fillWidth: true
-                                    text: jobCard.argvText
-                                    readOnly: true
-                                    selectByMouse: true
-                                    wrapMode: TextEdit.Wrap
-                                    font.family: Theme.mono
-                                    font.pixelSize: Theme.fsSmall
-                                    color: Theme.textColor
-                                    opacity: 0.7
-                                }
-                                RowActionButton {
-                                    implicitWidth: 24
-                                    implicitHeight: 24
-                                    icon.name: "edit-copy"
-                                    tip: "Copy command"
-                                    Layout.alignment: Qt.AlignTop
-                                    onClicked: {
-                                        argvEdit.selectAll()
-                                        argvEdit.copy()
-                                        argvEdit.deselect()
-                                    }
-                                }
-                            }
-
-                            // Log area with follow-tail hint.
-                            RowLayout {
-                                visible: !jobCard.jobCollapsed
-                                Layout.fillWidth: true
-
-                                Item { Layout.fillWidth: true }
-                                Label {
-                                    text: "↓ following tail"
-                                    opacity: 0.55
-                                    font.pixelSize: Theme.fsSmall
-                                    visible: (logScroll.ScrollBar.vertical.size
-                                              + logScroll.ScrollBar.vertical.position)
-                                             >= 0.999
-                                }
-                            }
-
-                            Rectangle {
-                                visible: !jobCard.jobCollapsed
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 120
-                                color: Theme.dark ? Qt.rgba(0, 0, 0, 0.25)
-                                                  : Qt.rgba(0, 0, 0, 0.04)
-                                border.color: Theme.border
-                                border.width: 1
-                                radius: Theme.radius
-
-                                ScrollView {
-                                    id: logScroll
-                                    anchors.fill: parent
-                                    anchors.margins: 3
-                                    clip: true
-
-                                    TextArea {
-                                        id: logArea
-                                        readOnly: true
-                                        selectByMouse: true
-                                        wrapMode: TextEdit.NoWrap
-                                        font.family: Theme.mono
-                                        font.pixelSize: Theme.fsSmall
-                                        background: null
-
-                                        // Initial backfill — covers opening
-                                        // mid-run or delegate rebuilds.
-                                        Component.onCompleted:
-                                            text = syncRunner.jobLog(jobCard.jobId)
-
-                                        Connections {
-                                            target: syncRunner
-                                            function onJobOutputAppended(id, t) {
-                                                if (id !== jobCard.jobId) return
-                                                // Sample scroll position BEFORE
-                                                // insert; only follow tail if
-                                                // the user was already at the
-                                                // bottom. insert (not append)
-                                                // avoids a stray newline.
-                                                const sb = logScroll.ScrollBar.vertical
-                                                const wasAtBottom =
-                                                    (sb.size + sb.position) >= 0.999
-                                                logArea.insert(logArea.length, t)
-                                                if (wasAtBottom) {
-                                                    logArea.cursorPosition = logArea.length
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    }
+                    Label {
+                        text: runRow.jobState === "done"
+                              || runRow.jobState === "failed"
+                              ? "exit " + runRow.exitCode : runRow.jobState
+                        opacity: 0.55
+                        font.pixelSize: Theme.fsSmall
+                    }
+                    RowActionButton {
+                        visible: runRow.jobState === "running"
+                                 || runRow.jobState === "pending"
+                        icon.name: "process-stop"
+                        tip: "Cancel this run"
+                        onClicked: syncRunner.cancel(runRow.jobId)
                     }
                 }
             }
+        }
+
+        Label {
+            visible: jobModel.count === 0
+            Layout.fillWidth: true
+            Layout.topMargin: Theme.s4
+            horizontalAlignment: Text.AlignHCenter
+            text: "Run a sync to see its output here."
+            opacity: 0.5
+        }
+
+        // --- Selected run ---------------------------------------------
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            color: Theme.border
+            visible: panel._selected !== null
+        }
+
+        RowLayout {
+            visible: panel._selected !== null
+            Layout.fillWidth: true
+            Label {
+                text: panel._selected ? panel._selected.label : ""
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            Label {
+                text: "↓ following"
+                opacity: 0.5
+                font.pixelSize: Theme.fsSmall
+                visible: (logScroll.ScrollBar.vertical.size
+                          + logScroll.ScrollBar.vertical.position) >= 0.999
+            }
+        }
+
+        // Import jobs run in-process and have no command line.
+        CommandPreview {
+            visible: panel._selected !== null && panel._selected.argvText !== ""
+            Layout.fillWidth: true
+            text: panel._selected ? panel._selected.argvText : ""
+        }
+
+        // The log grows with the pane.
+        Rectangle {
+            visible: panel._selected !== null
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            color: Theme.dark ? Qt.rgba(0, 0, 0, 0.25) : Qt.rgba(0, 0, 0, 0.04)
+            border.color: Theme.border
+            border.width: 1
+            radius: Theme.radius
+
+            ScrollView {
+                id: logScroll
+                anchors.fill: parent
+                anchors.margins: 3
+                clip: true
+
+                TextArea {
+                    id: logArea
+                    readOnly: true
+                    selectByMouse: true
+                    wrapMode: TextEdit.NoWrap
+                    font.family: Theme.mono
+                    font.pixelSize: Theme.fsSmall
+                    background: null
+                }
+            }
+        }
+
+        // Keeps the list at the top when nothing is selected.
+        Item {
+            visible: panel._selected === null
+            Layout.fillHeight: true
         }
     }
 }
