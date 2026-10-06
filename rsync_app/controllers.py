@@ -816,7 +816,7 @@ class ConnectionsController(QObject):
 
     @staticmethod
     def _dest_display(d: dict, dest_subpath: str, mounts: dict) -> str:
-        sub = dest_subpath or ""
+        sub = (dest_subpath or "").strip("/")  # same as rsync._resolve_path
         if d["kind"] == "local":
             mp = mounts.get(d["uuid"])
             if not mp:

@@ -1,5 +1,5 @@
 Name:           wersyncing
-Version:        0.8.0
+Version:        0.8.1
 Release:        1%{?dist}
 Summary:        Managed rsync connections with a PySide6/QML UI
 
@@ -67,6 +67,11 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/wersyncing.desktop
 %{_datadir}/icons/hicolor/scalable/apps/rsync-app.svg
 
 %changelog
+* Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.8.1-1
+- Connection list no longer shows a doubled slash when a subpath was
+  saved with leading/trailing slashes (the rsync command was already
+  correct)
+
 * Tue Oct 06 2026 Jan Moraru <jan@moraru.ch> - 0.8.0-1
 - Connections can now run in either direction: "device -> laptop" (pull)
   copies from a drive or server into a laptop folder with the same
