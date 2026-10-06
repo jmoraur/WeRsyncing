@@ -288,9 +288,13 @@ ThemedWindow {
         Label {
             visible: win._job !== null && !win._onWarning
                      && win._draftWarnCount > 0
-            text: win._draftWarnCount === 1
-                  ? "1 warning to confirm next."
-                  : win._draftWarnCount + " warnings to confirm next."
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            text: (win._draftWarnCount === 1
+                   ? "1 warning to confirm next:"
+                   : win._draftWarnCount + " warnings to confirm next:")
+                  + win._draftIssues.filter(i => i.severity === "warning")
+                        .map(i => "\n⚠  " + i.message).join("")
             color: Theme.warn
             font.pixelSize: Theme.fsSmall
         }
