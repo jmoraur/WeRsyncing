@@ -27,6 +27,7 @@ Dialog {
     property string initialDest: ""
     property string initialArchive: ""
     property int initialCopyMode: 0
+    property string initialPhone: ""
 
     property bool copyMode: false
 
@@ -40,6 +41,7 @@ Dialog {
             dest_path: destField.text.trim(),
             archive_root: archiveField.text.trim(),
             copy_mode: dlg.copyMode ? 1 : 0,
+            phone: phoneField.text.trim(),
         }
     }
 
@@ -53,6 +55,7 @@ Dialog {
         destField.text = dlg.initialDest
         archiveField.text = dlg.initialArchive
         dlg.copyMode = dlg.initialCopyMode === 1
+        phoneField.text = dlg.initialPhone
         dlg._refreshIssues()
         labelField.forceActiveFocus()
     }
@@ -103,6 +106,28 @@ Dialog {
                     + " straight off a mounted phone."
                   : "Duplicates are deleted from the dump folder and new"
                     + " files are moved out of it, leaving it empty."
+        }
+
+        SectionLabel {
+            visible: dlg.copyMode
+            text: "PHONE  ·  which phone to connect to"
+            Layout.topMargin: Theme.s1
+        }
+        TextField {
+            id: phoneField
+            visible: dlg.copyMode
+            Layout.fillWidth: true
+            placeholderText: "e.g. SM-F766B — part of the model or serial"
+        }
+        Label {
+            visible: dlg.copyMode
+            Layout.fillWidth: true
+            wrapMode: Text.Wrap
+            opacity: 0.65
+            font.pixelSize: Theme.fsSmall
+            text: "The phone is connected when you start an import and"
+                  + " released afterwards. Leave empty if only one phone is"
+                  + " ever plugged in."
         }
 
         SectionLabel {

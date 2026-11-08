@@ -243,6 +243,12 @@ def main() -> int:
     add("__", lambda: js("syncConfirm", "o.yesToAll()"))
     add("10_activity", lambda: None)
 
+    add("11a_import_form_copy", lambda: js(
+        "page", f"o.editEntity('importJob', {iid})", "importJobForm"))
+    add("11a2", lambda: js(
+        "importJobForm", "o.copyMode = true; o._refreshIssues()",
+        "importJobForm"))
+    add("__", lambda: close("importJobForm"))
     add("11_import_confirm", lambda: js(
         "page", f"o.runSync('import', {iid}, 0)", "importConfirm"))
     add("__", lambda: close("importConfirm"))

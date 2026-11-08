@@ -138,6 +138,7 @@ Item {
         importJobForm.initialDest = ""
         importJobForm.initialArchive = ""
         importJobForm.initialCopyMode = 0
+        importJobForm.initialPhone = ""
         importJobForm.open()
     }
 
@@ -159,6 +160,7 @@ Item {
             importJobForm.initialDest = row.dest_path || ""
             importJobForm.initialArchive = row.archive_root || ""
             importJobForm.initialCopyMode = row.copy_mode || 0
+            importJobForm.initialPhone = row.phone || ""
             importJobForm.open()
         }
     }

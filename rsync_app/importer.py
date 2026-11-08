@@ -31,7 +31,9 @@ import errno
 import os
 import re
 import shutil
+import subprocess
 import threading
+import time
 
 from PySide6.QtCore import QThread, Signal
 
@@ -667,6 +669,91 @@ def _is_within(inner: str, outer: str) -> bool:
 
 # --- Qt worker --------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# phone mounting — a phone over USB is not a folder until a FUSE daemon
+# (aft-mtp-mount) makes it one; the app does that itself before an import
+# and undoes it afterwards, so a job can keep a fixed source path.
+# ---------------------------------------------------------------------------
+
+def _aft_mount_of(path: str) -> str | None:
+    """The aft-mtp-mount mountpoint `path` lives under (also a dead one)."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                _dev, mp, fstype, *_ = line.split()
+                mp = mp.encode().decode("unicode_escape")  # "\040" = space
+                if fstype == "fuse.aft-mtp-mount" and (
+                        path == mp or path.startswith(mp + "/")):
+                    return mp
+    except OSError:
+        pass
+    return None
+
+
+def _mount_candidate(dump: str) -> str | None:
+    """Nearest existing ancestor of a missing `dump`, if it is an empty
+    folder — the place a phone would be mounted. A non-empty ancestor
+    means the folder is simply wrong, not unmounted."""
+    p = dump
+    while p not in ("/", ""):
+        p = os.path.dirname(p)
+        try:
+            entries = os.listdir(p)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        return p if not entries else None
+    return None
+
+
+def _phone_names() -> list[str]:
+    try:
+        out = subprocess.run(["aft-mtp-cli", "-l"], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    return [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+
+def unmount_phone(mountpoint: str) -> None:
+    subprocess.run(["fusermount", "-u", "-z", mountpoint],
+                   capture_output=True)
+
+
+def ensure_phone_mounted(dump: str, phone: str = "") -> str | None:
+    """Make `dump` reachable by mounting the phone it lives on. Returns the
+    mountpoint the caller is responsible for unmounting, or None when the
+    folder is a plain one (or no connected phone has it). `phone` is a
+    part of the phone's name (model or serial, as `aft-mtp-cli -l` lists
+    it); empty means try every connected phone."""
+    mp = _aft_mount_of(dump)
+    if mp and os.path.isdir(dump):
+        return mp                       # already mounted and alive
+    if mp:                              # dead endpoint or the wrong phone
+        unmount_phone(mp)
+    else:
+        mp = _mount_candidate(dump)
+        if mp is None:
+            return None
+    if not shutil.which("aft-mtp-mount"):
+        return None
+    # ponytail: without a phone name every connected phone is tried in
+    # turn, each attempt blocking up to ~5 s.
+    for name in ([phone] if phone else _phone_names()):
+        try:
+            subprocess.run(["aft-mtp-mount", "-D", name, mp],
+                           capture_output=True, timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for _ in range(20):
+            if os.path.isdir(dump):
+                return mp
+            time.sleep(0.25)
+        unmount_phone(mp)
+    return None
+
+
 class ImportWorker(QThread):
     """Runs one import (or dup report / archive clean-up) off the GUI thread.
     The runner treats it like a process: outputReady streams log lines,
@@ -711,3 +798,5 @@ class ImportWorker(QThread):
         finally:
             if conn is not None:
                 conn.close()
+            if self._cfg.get("phone_mount"):
+                unmount_phone(self._cfg["phone_mount"])

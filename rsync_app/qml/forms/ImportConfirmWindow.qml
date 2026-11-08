@@ -40,7 +40,7 @@ ThemedWindow {
 
     function open() {
         dlg.job = connections.getImportJob(dlg.jobId)
-        dlg.issues = connections.preflightImportDraft(dlg.job)
+        dlg.issues = connections.preflightImportJob(dlg.job)
         dlg._acks = ({})
         show()
         raise()

@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     dump_path    TEXT NOT NULL,
     dest_path    TEXT NOT NULL,
     archive_root TEXT NOT NULL,
-    copy_mode    INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))
+    copy_mode    INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1)),
+    phone        TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -148,6 +149,10 @@ class Database(QObject):
             self._conn.execute(
                 "ALTER TABLE import_jobs ADD COLUMN copy_mode "
                 "INTEGER NOT NULL DEFAULT 0 CHECK (copy_mode IN (0, 1))"
+            )
+        if "phone" not in have:     # 0.12: which phone a copy job reads
+            self._conn.execute(
+                "ALTER TABLE import_jobs ADD COLUMN phone TEXT NOT NULL DEFAULT ''"
             )
 
     def _migrate_to_bundles(self) -> None:
@@ -341,11 +346,13 @@ class Database(QObject):
     # --- import_jobs --------------------------------------------------------
 
     def add_import_job(self, *, label: str, dump_path: str, dest_path: str,
-                       archive_root: str, copy_mode: int = 0) -> int:
+                       archive_root: str, copy_mode: int = 0,
+                       phone: str = "") -> int:
         cur = self._conn.execute(
             "INSERT INTO import_jobs(label, dump_path, dest_path, archive_root,"
-            " copy_mode) VALUES (?, ?, ?, ?, ?)",
-            (label, dump_path, dest_path, archive_root, int(bool(copy_mode))),
+            " copy_mode, phone) VALUES (?, ?, ?, ?, ?, ?)",
+            (label, dump_path, dest_path, archive_root, int(bool(copy_mode)),
+             phone),
         )
         self._conn.commit()
         self.db_changed.emit()
@@ -353,11 +360,12 @@ class Database(QObject):
 
     def update_import_job(self, job_id: int, *, label=_UNSET, dump_path=_UNSET,
                           dest_path=_UNSET, archive_root=_UNSET,
-                          copy_mode=_UNSET) -> None:
+                          copy_mode=_UNSET, phone=_UNSET) -> None:
         if copy_mode is not _UNSET:
             copy_mode = int(bool(copy_mode))
         changes = self._collect_changes(
-            ["label", "dump_path", "dest_path", "archive_root", "copy_mode"],
+            ["label", "dump_path", "dest_path", "archive_root", "copy_mode",
+             "phone"],
             locals(),
         )
         self._apply_update("import_jobs", job_id, changes)

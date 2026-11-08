@@ -20,7 +20,7 @@ from PySide6.QtCore import QObject, Slot
 
 from rsync_app import hash_index
 from rsync_app.db import JOB_COLS, JOB_DEFAULTS, Database
-from rsync_app.importer import ImportWorker
+from rsync_app.importer import ImportWorker, ensure_phone_mounted
 from rsync_app.mounts import MountWatcher
 from rsync_app.preflight import check_import_job, check_job
 from rsync_app.probes import RemoteProbeWatcher
@@ -192,6 +192,7 @@ class ConnectionsController(QObject):
             "dest_path": path("dest_path"),
             "archive_root": path("archive_root"),
             "copy_mode": int(bool(draft.get("copy_mode"))),
+            "phone": str(draft.get("phone") or "").strip(),
         }
 
     @Slot("QVariantMap", result=int)
@@ -222,11 +223,21 @@ class ConnectionsController(QObject):
             job, index_empty=self._import_index_empty(job["archive_root"])
         )
 
+    @Slot("QVariantMap", result=list)
+    def preflightImportJob(self, job: dict) -> list[dict]:
+        """Confirm-time check: first make the phone reachable."""
+        if job.get("copy_mode"):
+            ensure_phone_mounted(job.get("dump_path", ""), job.get("phone", ""))
+        return self.preflightImportDraft(job)
+
     @Slot(int, bool)
     def runImport(self, job_id: int, dry_run: bool) -> None:
         job = self.getImportJob(job_id)
         if not job:
             return
+        if job.get("copy_mode"):
+            job["phone_mount"] = ensure_phone_mounted(
+                job["dump_path"], job.get("phone", ""))
         mode = "dry_run" if dry_run else "import"
         suffix = " (dry run)" if dry_run else ""
         worker = ImportWorker(job, mode)
@@ -689,7 +700,10 @@ class ConnectionsController(QObject):
                  "groupKey": "imports", "_parents": []}]
         for j in jobs:
             errors = [i for i in check_import_job(j)
-                      if i["severity"] == "error"]
+                      if i["severity"] == "error"
+                      # a copy job's phone is mounted when the popup opens
+                      and not (j.get("copy_mode")
+                               and i["code"] == "E_IMP_DUMP_MISSING")]
             rows.append({
                 "rowType": "importJob", "label": j["label"], "depth": 1,
                 "_parents": ["imports"], "jobKey": f"i{j['id']}",
